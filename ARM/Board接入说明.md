@@ -89,10 +89,16 @@ no flow control
 
 ```text
 *PING
-*GET:TIME
-*GET:DATE
+*GET TIME
+*GET DATE
 *SET:TIME=19:56:00
 *SET:DATE=2026-06-09
+*SET ALARM=20:00:00
+*SET ALARM=ON
+*SET MSG=HELLO S800 CLOCK
+*SET DISP=MSG
+*SET FORMAT=RIGHT
+*SET SPEED=FAST
 DISP
 AT+CLASS
 AT+STUDENTCODE
@@ -109,15 +115,51 @@ AT+STUDENTCODE
 - `*GET:DATE` 返回当前板端日期。
 - `*SET:TIME=19:56:00` 返回 `OK TIME`，并把板端时间设置为 19:56:00。
 - `*SET:DATE=2026-06-09` 返回 `OK DATE`，并把板端日期设置为 2026-06-09。
+- `*SET ALARM=20:00:00` 返回 `OK ALARM`，并自动启用闹钟。
+- `*SET ALARM=ON/OFF` 启用或关闭闹钟。
+- `*SET MSG=...` 进入消息流水显示。
+- `*SET FORMAT=LEFT/RIGHT` 切换正常/反向显示。
+- `*SET SPEED=SLOW/FAST` 切换流水速度。
 
 简写也可用：
 
 ```text
 TIME=19:56:00
 DATE=2026-06-09
+MSG=HELLO
 ```
 
 如果返回 `ERR TIME FORMAT` 或 `ERR DATE FORMAT`，通常是格式不对或日期非法，例如 `2026-02-30`。
+
+第二周版本会每秒主动输出：
+
+```text
+*EVT:DISP ...
+*EVT:LED 0x..
+```
+
+按键按下/松开会输出：
+
+```text
+*EVT:KEY FUNC DOWN
+*EVT:KEY FUNC UP
+```
+
+当前按键映射：
+
+| 键位 | 功能 |
+|---|---|
+| K0 | FUNC |
+| K1 | SHIFT |
+| K2 | ADD |
+| K3 | SAVE |
+| K4 | DISP |
+| K5 | SPEED |
+| K6 | FORMAT |
+| K7 | EXT |
+| USER1 | 对时请求事件 |
+| USER2 | 天气占位消息 |
+ 
 
 ## 需要你确认/修改
 

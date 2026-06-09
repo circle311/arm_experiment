@@ -1,0 +1,26 @@
+name: ARM syntax check
+
+on:
+  push:
+    paths:
+      - "ARM/**"
+      - ".github/workflows/arm-syntax-check.yml"
+  pull_request:
+    paths:
+      - "ARM/**"
+      - ".github/workflows/arm-syntax-check.yml"
+
+jobs:
+  syntax-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check ARM C syntax
+        run: |
+          gcc -std=c99 -Wall -Wextra -fsyntax-only \
+            -DPART_TM4C1294NCPDT \
+            -IARM/inc \
+            -IARM/driverlib \
+            ARM/exp3-1.c
