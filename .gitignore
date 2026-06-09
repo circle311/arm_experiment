@@ -1,0 +1,29 @@
+# Python virtual environments
+.venv/
+venv/
+env/
+pc_host/.venv/
+
+# Python cache and build outputs
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+build/
+dist/
+
+# Local installers and transient files
+pc_host/.downloads/
+*.log
+
+# IDE and OS files
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini
+
+# Project generated artifacts not meant for source control
+_ocr_text/
+_pdf_pages/
+OcrPages.exe
