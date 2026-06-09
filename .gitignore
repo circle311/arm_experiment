@@ -27,3 +27,17 @@ Desktop.ini
 _ocr_text/
 _pdf_pages/
 OcrPages.exe
+
+# Keil generated/local files
+ARM/Objects/
+ARM/Listings/
+ARM/*.uvguix.*
+ARM/driverlib/*.uvgui.*
+ARM/driverlib/ccs/
+ARM/driverlib/ewarm/Exe/
+ARM/driverlib/gcc/
+ARM/driverlib/rvmdk/*.crf
+ARM/driverlib/rvmdk/*.d
+ARM/driverlib/rvmdk/*.o
+ARM/driverlib/rvmdk/*.dep
+ARM/driverlib/rvmdk/*.htm
