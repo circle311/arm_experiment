@@ -30,9 +30,9 @@
 #define UART_PROMPT            "> "
 
 /* TODO: replace with your real information before final submission. */
-#define CLASS_NUMBER           "2405"
-#define STUDENT_CODE           "00000430"
-#define STUDENT_NAME_PINYIN    "ZHANGSAN"
+#define CLASS_NUMBER           "2445"
+#define STUDENT_CODE           "1910430"
+#define STUDENT_NAME_PINYIN    "YUANSHANGZHI"
 #define FIRMWARE_VERSION       "V1.2"
 
 /* I2C GPIO chip addresses and register definitions used by the S800 board. */
@@ -336,8 +336,181 @@ static bool str_equal_ignore_case(const char *a, const char *b)
     return (*a == '\0') && (*b == '\0');
 }
 
+static const char *skip_spaces(const char *text)
+{
+    while ((*text == ' ') || (*text == '\t')) {
+        ++text;
+    }
+    return text;
+}
+
+static bool starts_with_ignore_case(const char *text, const char *prefix,
+                                    const char **rest)
+{
+    while (*prefix != '\0') {
+        if (ascii_upper(*text) != ascii_upper(*prefix)) {
+            return false;
+        }
+        ++text;
+        ++prefix;
+    }
+
+    *rest = text;
+    return true;
+}
+
+static bool consume_set_separator(const char **text)
+{
+    const char *p = skip_spaces(*text);
+
+    if ((*p != '=') && (*p != ' ') && (*p != ':')) {
+        return false;
+    }
+
+    ++p;
+    *text = skip_spaces(p);
+    return true;
+}
+
+static bool parse_uint_range(const char **text, uint8_t min_digits,
+                             uint8_t max_digits, uint16_t max_value,
+                             uint16_t *value)
+{
+    const char *p = skip_spaces(*text);
+    uint8_t digits = 0u;
+    uint16_t result = 0u;
+
+    while ((*p >= '0') && (*p <= '9') && (digits < max_digits)) {
+        result = (uint16_t)((result * 10u) + (uint16_t)(*p - '0'));
+        ++p;
+        ++digits;
+    }
+
+    if ((digits < min_digits) || (result > max_value)) {
+        return false;
+    }
+
+    *value = result;
+    *text = p;
+    return true;
+}
+
+static bool consume_char(const char **text, char a, char b, char c)
+{
+    const char *p = skip_spaces(*text);
+
+    if ((*p != a) && (*p != b) && (*p != c)) {
+        return false;
+    }
+
+    ++p;
+    *text = p;
+    return true;
+}
+
+static bool parse_time_value(const char *text, uint8_t *hour,
+                             uint8_t *minute, uint8_t *second)
+{
+    const char *p = text;
+    uint16_t hh;
+    uint16_t mm;
+    uint16_t ss;
+
+    if (!parse_uint_range(&p, 1u, 2u, 23u, &hh)) {
+        return false;
+    }
+    if (!consume_char(&p, ':', '.', ':')) {
+        return false;
+    }
+    if (!parse_uint_range(&p, 1u, 2u, 59u, &mm)) {
+        return false;
+    }
+    if (!consume_char(&p, ':', '.', ':')) {
+        return false;
+    }
+    if (!parse_uint_range(&p, 1u, 2u, 59u, &ss)) {
+        return false;
+    }
+
+    p = skip_spaces(p);
+    if (*p != '\0') {
+        return false;
+    }
+
+    *hour = (uint8_t)hh;
+    *minute = (uint8_t)mm;
+    *second = (uint8_t)ss;
+    return true;
+}
+
+static bool parse_date_value(const char *text, uint16_t *year,
+                             uint8_t *month, uint8_t *day)
+{
+    const char *p = text;
+    uint16_t yy;
+    uint16_t mm;
+    uint16_t dd;
+
+    if (!parse_uint_range(&p, 2u, 4u, 9999u, &yy)) {
+        return false;
+    }
+    if (yy < 100u) {
+        yy = (uint16_t)(2000u + yy);
+    }
+    if (!consume_char(&p, '-', '.', '/')) {
+        return false;
+    }
+    if (!parse_uint_range(&p, 1u, 2u, 12u, &mm)) {
+        return false;
+    }
+    if (!consume_char(&p, '-', '.', '/')) {
+        return false;
+    }
+    if (!parse_uint_range(&p, 1u, 2u, 31u, &dd)) {
+        return false;
+    }
+
+    p = skip_spaces(p);
+    if (*p != '\0') {
+        return false;
+    }
+    if ((mm < 1u) || (dd < 1u) ||
+        (dd > days_in_month(yy, (uint8_t)mm))) {
+        return false;
+    }
+
+    *year = yy;
+    *month = (uint8_t)mm;
+    *day = (uint8_t)dd;
+    return true;
+}
+
+static bool line_payload_after_prefix(const char *line, const char *prefix,
+                                      const char **payload)
+{
+    const char *rest;
+
+    if (!starts_with_ignore_case(line, prefix, &rest)) {
+        return false;
+    }
+    if (!consume_set_separator(&rest)) {
+        return false;
+    }
+
+    *payload = rest;
+    return true;
+}
+
 static void uart_handle_line(char *line)
 {
+    const char *payload;
+    uint8_t hour;
+    uint8_t minute;
+    uint8_t second;
+    uint16_t year;
+    uint8_t month;
+    uint8_t day;
+
     Board_UartWriteString("RX: ");
     Board_UartWriteString(line);
     Board_UartWriteString("\r\n");
@@ -363,6 +536,30 @@ static void uart_handle_line(char *line)
         Board_UartWriteString("CODE");
         Board_UartWriteString(STUDENT_CODE);
         Board_UartWriteString("\r\n");
+    } else if (line_payload_after_prefix(line, "*SET:TIME", &payload) ||
+               line_payload_after_prefix(line, "TIME", &payload)) {
+        if (parse_time_value(payload, &hour, &minute, &second)) {
+            g_clock.hour = hour;
+            g_clock.minute = minute;
+            g_clock.second = second;
+            g_clock.millisecond = 0u;
+            g_clock.last_tick_ms = Board_Millis();
+            display_current_time_or_date();
+            Board_UartWriteString("OK TIME\r\n");
+        } else {
+            Board_UartWriteString("ERR TIME FORMAT\r\n");
+        }
+    } else if (line_payload_after_prefix(line, "*SET:DATE", &payload) ||
+               line_payload_after_prefix(line, "DATE", &payload)) {
+        if (parse_date_value(payload, &year, &month, &day)) {
+            g_clock.year = year;
+            g_clock.month = month;
+            g_clock.day = day;
+            display_current_time_or_date();
+            Board_UartWriteString("OK DATE\r\n");
+        } else {
+            Board_UartWriteString("ERR DATE FORMAT\r\n");
+        }
     } else {
         Board_UartWriteString("OK ECHO\r\n");
     }

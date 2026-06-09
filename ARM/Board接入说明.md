@@ -91,6 +91,8 @@ no flow control
 *PING
 *GET:TIME
 *GET:DATE
+*SET:TIME=19:56:00
+*SET:DATE=2026-06-09
 DISP
 AT+CLASS
 AT+STUDENTCODE
@@ -105,6 +107,17 @@ AT+STUDENTCODE
 - `*PING` 返回 `*PONG 0`。
 - `*GET:TIME` 返回当前板端时间。
 - `*GET:DATE` 返回当前板端日期。
+- `*SET:TIME=19:56:00` 返回 `OK TIME`，并把板端时间设置为 19:56:00。
+- `*SET:DATE=2026-06-09` 返回 `OK DATE`，并把板端日期设置为 2026-06-09。
+
+简写也可用：
+
+```text
+TIME=19:56:00
+DATE=2026-06-09
+```
+
+如果返回 `ERR TIME FORMAT` 或 `ERR DATE FORMAT`，通常是格式不对或日期非法，例如 `2026-02-30`。
 
 ## 需要你确认/修改
 
