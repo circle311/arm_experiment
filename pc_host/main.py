@@ -263,6 +263,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if not command:
             return
         command = self.normalize_manual_command(command)
+        if self.command_edit.text().strip() != command:
+            self.command_edit.setText(command)
         self.log("TX", command, LOG_TX)
         self.worker.send_line(command)
 

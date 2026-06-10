@@ -22,6 +22,11 @@ class SerialWorker(QtCore.QThread):
         self._running = False
         self._last_ping_sent: Optional[float] = None
         self._port = ""
+        self._tx_queue: list[str] = []
+        self._last_tx_at = 0.0
+        self._tx_gap_s = 0.5
+        self._tx_timer = QtCore.QTimer(self)
+        self._tx_timer.timeout.connect(self._drain_tx_queue)
 
     @staticmethod
     def scan_ports() -> list[str]:
@@ -43,6 +48,8 @@ class SerialWorker(QtCore.QThread):
 
     def close_port(self) -> None:
         self._running = False
+        self._tx_queue.clear()
+        self._tx_timer.stop()
         if self._serial is not None:
             try:
                 self._serial.close()
@@ -59,12 +66,42 @@ class SerialWorker(QtCore.QThread):
         data = format_command(command)
         if not data:
             return
+        self._tx_queue.append(command)
+        if not self._tx_timer.isActive():
+            self._schedule_tx()
+
+    def _schedule_tx(self) -> None:
+        elapsed = time.monotonic() - self._last_tx_at
+        delay_s = max(0.0, self._tx_gap_s - elapsed)
+        self._tx_timer.start(max(1, int(delay_s * 1000)))
+
+    def _drain_tx_queue(self) -> None:
+        if self._serial is None or not self._serial.is_open:
+            self._tx_queue.clear()
+            self._tx_timer.stop()
+            return
+        if not self._tx_queue:
+            self._tx_timer.stop()
+            return
+
+        elapsed = time.monotonic() - self._last_tx_at
+        if elapsed < self._tx_gap_s:
+            self._schedule_tx()
+            return
+
+        command = self._tx_queue.pop(0)
+        data = format_command(command)
         if command.strip().upper() == "*PING":
             self._last_ping_sent = time.monotonic()
         try:
             self._serial.write(data.encode("ascii", errors="ignore"))
+            self._last_tx_at = time.monotonic()
         except serial.SerialException as exc:
             self.error_occurred.emit(str(exc))
+        if not self._tx_queue:
+            self._tx_timer.stop()
+        else:
+            self._schedule_tx()
 
     def run(self) -> None:
         buffer = bytearray()

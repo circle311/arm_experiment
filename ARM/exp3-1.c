@@ -149,7 +149,9 @@ typedef struct {
     uint32_t last_key_scan_ms;
     uint32_t last_edit_ms;
     uint32_t last_scroll_ms;
+    uint32_t message_started_ms;
     uint8_t scroll_index;
+    uint8_t message_steps;
     char message[MESSAGE_MAX + 1u];
 } ClockState;
 
@@ -164,6 +166,7 @@ static void Board_UartWriteByte(uint8_t byte);
 static void Board_UartWriteString(const char *text);
 static void Board_BuzzerWrite(bool on);
 static void display_text_8(const char *text, uint8_t dp_mask);
+static void start_message_display(const char *text);
 static void apply_buzzer_output(void);
 
 static void S800_GPIO_Init(void);
@@ -1288,6 +1291,19 @@ static void next_display_mode(void)
     uart_print_disp_event();
 }
 
+static void start_message_display(const char *text)
+{
+    uint32_t now = Board_Millis();
+
+    copy_text(g_clock.message, sizeof(g_clock.message), text);
+    g_clock.display_mode = DISPLAY_MESSAGE;
+    g_clock.scroll_index = 0u;
+    g_clock.message_steps = 0u;
+    g_clock.message_started_ms = now;
+    g_clock.last_scroll_ms = now;
+    display_render();
+}
+
 static void edit_add_current_field(void)
 {
     if (g_clock.edit_mode == EDIT_TIME) {
@@ -1388,24 +1404,26 @@ static void handle_key_press(KeyId key)
     } else if (key == KEY_USER1) {
         /* PC listens to USER1 and starts NTP sync. */
     } else if (key == KEY_USER2) {
-        g_clock.display_mode = DISPLAY_MESSAGE;
         if (g_clock.weather_valid) {
-            g_clock.message[0] = (g_clock.weather_temp < 0) ? '-' : '+';
-            g_clock.message[1] = digit_u8((uint8_t)((g_clock.weather_temp < 0) ?
-                                                      -g_clock.weather_temp :
-                                                      g_clock.weather_temp), 1u);
-            g_clock.message[2] = digit_u8((uint8_t)((g_clock.weather_temp < 0) ?
-                                                      -g_clock.weather_temp :
-                                                      g_clock.weather_temp), 0u);
-            g_clock.message[3] = 'C';
-            g_clock.message[4] = ' ';
-            g_clock.message[5] = g_clock.weather_code[0];
-            g_clock.message[6] = g_clock.weather_code[1];
-            g_clock.message[7] = g_clock.weather_code[2];
-            g_clock.message[8] = '\0';
+            char weather_text[9u];
+            weather_text[0] = (g_clock.weather_temp < 0) ? '-' : '+';
+            weather_text[1] = digit_u8((uint8_t)((g_clock.weather_temp < 0) ?
+                                                  -g_clock.weather_temp :
+                                                  g_clock.weather_temp), 1u);
+            weather_text[2] = digit_u8((uint8_t)((g_clock.weather_temp < 0) ?
+                                                  -g_clock.weather_temp :
+                                                  g_clock.weather_temp), 0u);
+            weather_text[3] = 'C';
+            weather_text[4] = ' ';
+            weather_text[5] = g_clock.weather_code[0];
+            weather_text[6] = g_clock.weather_code[1];
+            weather_text[7] = g_clock.weather_code[2];
+            weather_text[8] = '\0';
+            start_message_display(weather_text);
         } else {
-            copy_text(g_clock.message, sizeof(g_clock.message), "--C ---");
+            start_message_display("--C ---");
         }
+        return;
     }
 
     display_render();
@@ -1521,15 +1539,41 @@ static void scroll_poll(void)
     uint32_t interval = (g_clock.scroll_speed == SPEED_FAST) ? 180u : 420u;
     uint8_t len = text_len(g_clock.message);
 
-    if (g_clock.display_mode != DISPLAY_MESSAGE || len <= SEG_DIGITS) {
+    if (g_clock.display_mode != DISPLAY_MESSAGE) {
+        return;
+    }
+
+    if (len == 0u) {
+        g_clock.display_mode = DISPLAY_TIME;
+        g_clock.scroll_index = 0u;
+        display_render();
+        uart_print_disp_event();
+        return;
+    }
+
+    if (len <= SEG_DIGITS) {
+        if ((uint32_t)(now - g_clock.message_started_ms) >= 3000u) {
+            g_clock.display_mode = DISPLAY_TIME;
+            g_clock.scroll_index = 0u;
+            display_render();
+            uart_print_disp_event();
+        }
         return;
     }
 
     if ((uint32_t)(now - g_clock.last_scroll_ms) >= interval) {
         g_clock.last_scroll_ms = now;
         g_clock.scroll_index++;
+        g_clock.message_steps++;
         if (g_clock.scroll_index >= len) {
             g_clock.scroll_index = 0u;
+        }
+        if (g_clock.message_steps >= len) {
+            g_clock.display_mode = DISPLAY_TIME;
+            g_clock.scroll_index = 0u;
+            display_render();
+            uart_print_disp_event();
+            return;
         }
         display_render();
     }
@@ -1616,8 +1660,11 @@ static void reset_state(void)
     g_clock.weather_temp = 0;
     copy_text(g_clock.weather_code, sizeof(g_clock.weather_code), "---");
     g_clock.scroll_index = 0u;
+    g_clock.message_steps = 0u;
     g_clock.last_tick_ms = Board_Millis();
     g_clock.last_event_ms = g_clock.last_tick_ms;
+    g_clock.last_scroll_ms = g_clock.last_tick_ms;
+    g_clock.message_started_ms = g_clock.last_tick_ms;
     copy_text(g_clock.message, sizeof(g_clock.message), "HELLO S800 CLOCK");
     display_render();
 }
@@ -1807,10 +1854,7 @@ static void handle_set_command(const char *payload)
         Board_UartWriteString("OK SCROLL\r\n");
     } else if (line_payload_after_prefix(payload, "MSG", &value) ||
                line_payload_after_prefix(payload, "MESSAGE", &value)) {
-        copy_text(g_clock.message, sizeof(g_clock.message), value);
-        g_clock.display_mode = DISPLAY_MESSAGE;
-        g_clock.scroll_index = 0u;
-        display_render();
+        start_message_display(value);
         Board_UartWriteString("OK MSG\r\n");
     } else if (line_payload_after_prefix(payload, "KEY", &value)) {
         g_suppress_key_event = true;
@@ -1956,6 +2000,9 @@ static void uart_handle_line(char *line)
         Board_UartWriteString("\r\n");
     } else if (line_payload_after_prefix(line, "MSG", &payload)) {
         handle_set_command(line);
+    } else if (line[0] != '*') {
+        start_message_display(line);
+        Board_UartWriteString("OK MSG\r\n");
     } else {
         Board_UartWriteString("ERROR SYNTAX\r\n");
     }
@@ -2033,17 +2080,20 @@ static uint8_t char_to_seg(char ch)
     case 'H': return 0x76u;
     case 'I': return 0x06u;
     case 'J': return 0x1eu;
+    case 'K': return 0x76u;
     case 'L': return 0x38u;
     case 'M': return 0x37u;
     case 'N': return 0x54u;
     case 'O': return 0x3fu;
     case 'P': return 0x73u;
+    case 'Q': return 0x67u;
     case 'R': return 0x50u;
     case 'S': return 0x6du;
     case 'T': return 0x78u;
     case 'U': return 0x3eu;
     case 'V': return 0x3eu;
     case 'W': return 0x2au;
+    case 'X': return 0x76u;
     case 'Y': return 0x6eu;
     case 'Z': return 0x5bu;
     case '-': return 0x40u;
