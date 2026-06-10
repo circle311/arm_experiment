@@ -99,6 +99,10 @@ no flow control
 *SET DISP=MSG
 *SET FORMAT=RIGHT
 *SET SPEED=FAST
+*SET EVT=ON
+*SET EVT=OFF
+*SET BEEP=ON
+*SET BEEP=OFF
 DISP
 AT+CLASS
 AT+STUDENTCODE
@@ -120,6 +124,8 @@ AT+STUDENTCODE
 - `*SET MSG=...` 进入消息流水显示。
 - `*SET FORMAT=LEFT/RIGHT` 切换正常/反向显示。
 - `*SET SPEED=SLOW/FAST` 切换流水速度。
+- `*SET EVT=ON/OFF` 打开或关闭每秒主动上报。第二周调试版默认关闭，避免 SSCOM 刷屏。
+- `*SET BEEP=ON/OFF` 打开或关闭当前蜂鸣占位输出。
 
 简写也可用：
 
@@ -129,13 +135,27 @@ DATE=2026-06-09
 MSG=HELLO
 ```
 
-如果返回 `ERR TIME FORMAT` 或 `ERR DATE FORMAT`，通常是格式不对或日期非法，例如 `2026-02-30`。
+如果返回 `ERROR SYNTAX`，通常是命令格式不对。
+如果返回 `ERROR PARAM`，通常是参数名或参数值不支持。
+如果返回 `ERROR RANGE`，通常是时间/日期越界，例如 `2026-02-30`。
 
-第二周版本会每秒主动输出：
+第二周版本支持每秒主动输出，但默认关闭。需要 PC 镜像同步时，先发送：
+
+```text
+*SET EVT=ON
+```
+
+随后会每秒输出：
 
 ```text
 *EVT:DISP ...
 *EVT:LED 0x..
+```
+
+手动 SSCOM 调试时可发送：
+
+```text
+*SET EVT=OFF
 ```
 
 按键按下/松开会输出：
@@ -159,6 +179,17 @@ MSG=HELLO
 | K7 | EXT |
 | USER1 | 对时请求事件 |
 | USER2 | 天气占位消息 |
+
+## 蜂鸣器说明
+
+`S800板介绍.pdf` 中只明确列出：
+
+- `PWM0-3` 对应 `PF0-PF3`，经过 ULN2003 输出。
+- 红板/蓝板均有 `PF0` 对应 LED。
+
+目前资料没有直接给出蜂鸣器专用管脚。因此当前代码里的 `Board_BuzzerWrite()` 先使用 `PF0` 做响铃占位输出：闹钟触发或 `*SET BEEP=ON` 时，能看到 PF0 对应 LED/输出变化，但不保证真实蜂鸣器发声。
+
+如果课程另有蜂鸣器例程或原理图，请把对应文件发给我，我再把 `Board_BuzzerWrite()` 改到真实蜂鸣器管脚。
  
 
 ## 需要你确认/修改

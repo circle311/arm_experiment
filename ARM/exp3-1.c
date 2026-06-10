@@ -127,6 +127,7 @@ typedef struct {
     ScrollDirection scroll_dir;
     ScrollSpeed scroll_speed;
     bool format_right;
+    bool events_enabled;
     bool heartbeat_on;
 
     uint8_t led_state;
@@ -366,13 +367,16 @@ static bool is_token_off(const char *text)
 
 static bool consume_set_separator(const char **text)
 {
-    const char *p = skip_spaces(*text);
+    const char *p = *text;
 
-    if ((*p != '=') && (*p != ' ') && (*p != ':')) {
+    if ((*p != '=') && (*p != ' ') && (*p != '\t') && (*p != ':')) {
         return false;
     }
 
-    ++p;
+    do {
+        ++p;
+    } while ((*p == ' ') || (*p == '\t'));
+
     *text = skip_spaces(p);
     return true;
 }
@@ -757,9 +761,9 @@ static void uart_print_led(void)
     Board_UartWriteString("\r\n");
 }
 
-static void uart_print_disp_event(void)
+static void uart_print_disp_status(void)
 {
-    Board_UartWriteString("*EVT:DISP ");
+    Board_UartWriteString("DISP ");
     if (g_clock.display_mode == DISPLAY_DATE_SHORT) {
         Board_UartWriteString("DATE ");
     } else if (g_clock.display_mode == DISPLAY_DATE_LONG) {
@@ -772,9 +776,24 @@ static void uart_print_disp_event(void)
     Board_UartWriteString(g_clock.format_right ? "RIGHT\r\n" : "LEFT\r\n");
 }
 
+static void uart_print_disp_event(void)
+{
+    if (!g_clock.events_enabled) {
+        return;
+    }
+
+    Board_UartWriteString("*EVT:");
+    uart_print_disp_status();
+}
+
 static void uart_print_led_event(void)
 {
     static const char hex[] = "0123456789ABCDEF";
+
+    if (!g_clock.events_enabled) {
+        return;
+    }
+
     Board_UartWriteString("*EVT:LED 0x");
     Board_UartWriteByte((uint8_t)hex[(g_clock.led_state >> 4) & 0x0fu]);
     Board_UartWriteByte((uint8_t)hex[g_clock.led_state & 0x0fu]);
@@ -783,6 +802,10 @@ static void uart_print_led_event(void)
 
 static void uart_print_mode_event(void)
 {
+    if (!g_clock.events_enabled) {
+        return;
+    }
+
     Board_UartWriteString("*EVT:MODE ");
     if (g_clock.edit_mode == EDIT_TIME) {
         Board_UartWriteString("EDIT_TIME\r\n");
@@ -906,9 +929,11 @@ static void edit_add_current_field(void)
 static void handle_key_press(KeyId key)
 {
     g_key_activity_ms = 120u;
-    Board_UartWriteString("*EVT:KEY ");
-    Board_UartWriteString(key_name(key));
-    Board_UartWriteString(" DOWN\r\n");
+    if (g_clock.events_enabled) {
+        Board_UartWriteString("*EVT:KEY ");
+        Board_UartWriteString(key_name(key));
+        Board_UartWriteString(" DOWN\r\n");
+    }
 
     if (g_clock.alarm_ringing && key == KEY_FUNC) {
         stop_alarm();
@@ -963,9 +988,11 @@ static void handle_key_press(KeyId key)
 
 static void handle_key_release(KeyId key)
 {
-    Board_UartWriteString("*EVT:KEY ");
-    Board_UartWriteString(key_name(key));
-    Board_UartWriteString(" UP\r\n");
+    if (g_clock.events_enabled) {
+        Board_UartWriteString("*EVT:KEY ");
+        Board_UartWriteString(key_name(key));
+        Board_UartWriteString(" UP\r\n");
+    }
 }
 
 static void keys_poll(void)
@@ -1030,14 +1057,16 @@ static void alarm_poll(void)
         g_clock.last_alarm_toggle_ms = now;
         g_clock.buzzer_on = true;
         Board_BuzzerWrite(true);
-        Board_UartWriteString("*EVT:MODE ALARM_RING\r\n");
+        if (g_clock.events_enabled) {
+            Board_UartWriteString("*EVT:MODE ALARM_RING\r\n");
+        }
     }
 
     if (!g_clock.alarm_ringing) {
         return;
     }
 
-    if ((uint32_t)(now - g_clock.alarm_started_ms) >= 60000u) {
+    if ((uint32_t)(now - g_clock.alarm_started_ms) >= 10000u) {
         stop_alarm();
         return;
     }
@@ -1137,6 +1166,7 @@ static void reset_state(void)
     g_clock.scroll_dir = SCROLL_LEFT;
     g_clock.scroll_speed = SPEED_SLOW;
     g_clock.format_right = false;
+    g_clock.events_enabled = false;
     g_clock.scroll_index = 0u;
     g_clock.last_tick_ms = Board_Millis();
     g_clock.last_event_ms = g_clock.last_tick_ms;
@@ -1195,6 +1225,19 @@ static void handle_set_command(const char *payload)
         } else {
             Board_UartWriteString("ERROR PARAM\r\n");
         }
+    } else if (line_payload_after_prefix(payload, "BEEP", &value) ||
+               line_payload_after_prefix(payload, "BUZZ", &value)) {
+        if (is_token_on(value)) {
+            g_clock.buzzer_on = true;
+            Board_BuzzerWrite(true);
+            Board_UartWriteString("OK BEEP ON\r\n");
+        } else if (is_token_off(value)) {
+            g_clock.buzzer_on = false;
+            Board_BuzzerWrite(false);
+            Board_UartWriteString("OK BEEP OFF\r\n");
+        } else {
+            Board_UartWriteString("ERROR PARAM\r\n");
+        }
     } else if (line_payload_after_prefix(payload, "DISP", &value)) {
         if (str_equal_ignore_case(value, "TIME")) {
             g_clock.display_mode = DISPLAY_TIME;
@@ -1232,6 +1275,17 @@ static void handle_set_command(const char *payload)
             return;
         }
         Board_UartWriteString("OK SPEED\r\n");
+    } else if (line_payload_after_prefix(payload, "EVT", &value) ||
+               line_payload_after_prefix(payload, "EVENT", &value)) {
+        if (is_token_on(value)) {
+            g_clock.events_enabled = true;
+            Board_UartWriteString("OK EVT ON\r\n");
+        } else if (is_token_off(value)) {
+            g_clock.events_enabled = false;
+            Board_UartWriteString("OK EVT OFF\r\n");
+        } else {
+            Board_UartWriteString("ERROR PARAM\r\n");
+        }
     } else if (line_payload_after_prefix(payload, "SCROLL", &value)) {
         if (is_token_left(value)) {
             g_clock.scroll_dir = SCROLL_LEFT;
@@ -1293,7 +1347,7 @@ static void handle_get_command(const char *payload)
     } else if (str_equal_ignore_case(payload, "LED")) {
         uart_print_led();
     } else if (str_equal_ignore_case(payload, "DISP")) {
-        uart_print_disp_event();
+        uart_print_disp_status();
     } else if (str_equal_ignore_case(payload, "MSG") ||
                str_equal_ignore_case(payload, "MESSAGE")) {
         Board_UartWriteString("MSG ");
