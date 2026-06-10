@@ -45,7 +45,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(1180, 760)
         self.worker = SerialWorker(self)
         self.pending_tests: list[tuple[str, str]] = []
+        self.current_test: tuple[str, str, bool] | None = None
         self.test_results: list[tuple[str, bool, str]] = []
+        self.test_serial = 0
+        self.command_queue: list[str] = []
+        self.queue_active = False
         self.last_weather: WeatherData | None = None
         self._build_ui()
         self._connect_signals()
@@ -258,8 +262,37 @@ class MainWindow(QtWidgets.QMainWindow):
         command = command.strip()
         if not command:
             return
+        command = self.normalize_manual_command(command)
         self.log("TX", command, LOG_TX)
         self.worker.send_line(command)
+
+    @staticmethod
+    def normalize_manual_command(command: str) -> str:
+        upper = command.upper()
+        known_prefixes = (
+            "*", "SET", "GET", "TIME", "DATE", "DISP", "MSG", "AT+", "RST", "NTP"
+        )
+        if upper.startswith(known_prefixes):
+            return command
+        return f"*SET:MSG {command}"
+
+    def enqueue_commands(self, commands: list[str], gap_ms: int = 450) -> None:
+        if not commands:
+            return
+        if self.queue_active:
+            self.command_queue.extend(commands)
+            return
+        self.command_queue = list(commands)
+        self.queue_active = True
+        self._send_next_queued(gap_ms)
+
+    def _send_next_queued(self, gap_ms: int = 450) -> None:
+        if not self.command_queue:
+            self.queue_active = False
+            return
+        command = self.command_queue.pop(0)
+        self.send_command(command)
+        QtCore.QTimer.singleShot(gap_ms, lambda: self._send_next_queued(gap_ms))
 
     def send_date(self) -> None:
         date = self.date_edit.date()
@@ -279,8 +312,7 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as exc:  # noqa: BLE001
             self.on_error(f"NTP failed: {exc}")
             return
-        for command in commands_for_datetime(dt):
-            self.send_command(command)
+        self.enqueue_commands(commands_for_datetime(dt), gap_ms=650)
 
     def fetch_weather(self) -> None:
         try:
@@ -300,8 +332,7 @@ class MainWindow(QtWidgets.QMainWindow):
             temp = 31
             cond = "SUN"
             self.last_weather = WeatherData(temp, cond, "manual fallback")
-        for command in commands_for_weather(self.last_weather):
-            self.send_command(command)
+        self.enqueue_commands(commands_for_weather(self.last_weather), gap_ms=500)
 
     def auto_day_night(self) -> None:
         city = LocationInfo("Shanghai", "China", "Asia/Shanghai", 31.2304, 121.4737)
@@ -338,21 +369,22 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def run_smoke_test(self) -> None:
         self.pending_tests = [
-            ("PING", "*PING"),
-            ("SET DATE", "*SET:DATE YEAR MONTH DATE 2026 06 10"),
-            ("SET TIME", "*SET:TIME HOUR MIN SEC 12 30 45"),
-            ("GET TIME", "*GET:TIME"),
-            ("FORMAT RIGHT", "*SET:FORMAT RIGHT"),
-            ("GET TIME RIGHT", "*GET:TIME"),
-            ("DISP OFF", "*SET:DISP OFF"),
-            ("DISP ON", "*SET:DISP ON"),
-            ("LED", "*SET:LED FF"),
-            ("LED AUTO", "*SET:LED 00"),
-            ("BEEP", "*SET:BEEP 500"),
-            ("KEY DISP", "*SET:KEY DISP"),
-            ("ERROR", "*SET:BEEP 9999"),
+            ("PING", "*PING", False),
+            ("SET DATE", "*SET:DATE YEAR MONTH DATE 2026 06 10", False),
+            ("SET TIME", "*SET:TIME HOUR MIN SEC 12 30 45", False),
+            ("GET TIME", "*GET:TIME", False),
+            ("FORMAT RIGHT", "*SET:FORMAT RIGHT", False),
+            ("GET TIME RIGHT", "*GET:TIME", False),
+            ("DISP OFF", "*SET:DISP OFF", False),
+            ("DISP ON", "*SET:DISP ON", False),
+            ("LED", "*SET:LED FF", False),
+            ("LED AUTO", "*SET:LED 00", False),
+            ("BEEP", "*SET:BEEP 500", False),
+            ("KEY DISP", "*SET:KEY DISP", False),
+            ("ERROR", "*SET:BEEP 9999", True),
         ]
         self.test_results = []
+        self.current_test = None
         self.test_label.setText("Running smoke test...")
         self._run_next_test()
 
@@ -362,11 +394,24 @@ class MainWindow(QtWidgets.QMainWindow):
             total = len(self.test_results)
             self.test_label.setText(f"Passed {passed}/{total}")
             self.log("EVT", f"SMOKE TEST Passed {passed}/{total}", LOG_EVT)
+            self.current_test = None
             return
-        name, command = self.pending_tests.pop(0)
-        self.test_results.append((name, False, "waiting"))
+        name, command, expect_error = self.pending_tests.pop(0)
+        self.current_test = (name, command, expect_error)
+        self.test_serial += 1
+        serial = self.test_serial
         self.send_command(command)
-        QtCore.QTimer.singleShot(280, self._run_next_test)
+        QtCore.QTimer.singleShot(1200, lambda s=serial: self._test_timeout(s))
+
+    def _test_timeout(self, serial: int) -> None:
+        if serial != self.test_serial:
+            return
+        if self.current_test is None:
+            return
+        name, _, _ = self.current_test
+        self.test_results.append((name, False, "timeout"))
+        self.current_test = None
+        self._run_next_test()
 
     def on_line_received(self, line: str) -> None:
         parsed = parse_line(line)
@@ -406,11 +451,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self.log("RX", line, LOG_RX)
 
     def _mark_latest_test(self, ok: bool, detail: str) -> None:
-        if not self.test_results:
+        if self.current_test is None:
             return
-        name, old_ok, old_detail = self.test_results[-1]
-        if old_detail == "waiting" or not old_ok:
-            self.test_results[-1] = (name, ok, detail)
+        name, _, expect_error = self.current_test
+        passed = (ok and not expect_error) or ((not ok) and expect_error)
+        if expect_error and "ERROR" in detail.upper():
+            passed = True
+        self.test_results.append((name, passed, detail))
+        self.current_test = None
+        QtCore.QTimer.singleShot(250, self._run_next_test)
 
     def _record_event(self, kind: str, detail: str) -> None:
         first_write = not EVENT_CSV.exists()

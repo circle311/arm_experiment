@@ -909,17 +909,28 @@ static void apply_format(char chars[SEG_DIGITS], uint8_t *dp_mask)
 {
     char tmp[SEG_DIGITS];
     uint8_t new_dp = 0u;
+    uint8_t active_len = SEG_DIGITS;
     uint8_t i;
 
     if (!g_clock.format_right) {
         return;
     }
 
-    for (i = 0u; i < SEG_DIGITS; ++i) {
-        uint8_t src = (uint8_t)(SEG_DIGITS - 1u - i);
+    while ((active_len > 0u) && (chars[active_len - 1u] == ' ')) {
+        active_len--;
+    }
+
+    fill_blank(tmp);
+    for (i = 0u; i < active_len; ++i) {
+        uint8_t src = (uint8_t)(active_len - 1u - i);
         tmp[i] = chars[src];
-        if ((*dp_mask & (uint8_t)(1u << src)) != 0u) {
-            new_dp |= (uint8_t)(1u << i);
+    }
+
+    for (i = 0u; i < active_len; ++i) {
+        if ((*dp_mask & (uint8_t)(1u << i)) != 0u) {
+            if (i + 1u < active_len) {
+                new_dp |= (uint8_t)(1u << (active_len - 2u - i));
+            }
         }
     }
 
@@ -1265,11 +1276,13 @@ static void stop_alarm(void)
 
 static void next_display_mode(void)
 {
-    if (g_clock.display_mode == DISPLAY_MESSAGE) {
+    if ((g_clock.display_mode == DISPLAY_MESSAGE) ||
+        (g_clock.display_mode == DISPLAY_DATE_LONG)) {
         g_clock.display_mode = DISPLAY_TIME;
+    } else if (g_clock.display_mode == DISPLAY_TIME) {
+        g_clock.display_mode = DISPLAY_DATE_SHORT;
     } else {
-        g_clock.display_mode =
-            (DisplayMode)(((uint8_t)g_clock.display_mode + 1u) % 4u);
+        g_clock.display_mode = DISPLAY_DATE_LONG;
     }
     display_render();
     uart_print_disp_event();
