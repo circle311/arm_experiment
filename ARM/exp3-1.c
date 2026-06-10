@@ -613,6 +613,199 @@ static bool parse_date_value(const char *text, uint16_t *year,
     return true;
 }
 
+static bool read_token(const char **text, char *token, uint8_t token_size)
+{
+    const char *p = skip_spaces(*text);
+    uint8_t i = 0u;
+
+    if ((*p == '\0') || (token_size == 0u)) {
+        return false;
+    }
+
+    while ((*p != '\0') && (*p != ' ') && (*p != '\t')) {
+        if (i + 1u >= token_size) {
+            return false;
+        }
+        token[i++] = *p++;
+    }
+    token[i] = '\0';
+    *text = p;
+    return true;
+}
+
+static bool parse_token_uint(const char *token, uint16_t max_value,
+                             uint16_t *value)
+{
+    const char *p = token;
+
+    if (!parse_uint_range(&p, 1u, 4u, max_value, value)) {
+        return false;
+    }
+    return *skip_spaces(p) == '\0';
+}
+
+static bool time_field_token(const char *token, char *field)
+{
+    if (str_equal_ignore_case(token, "H") ||
+        str_equal_ignore_case(token, "HOUR")) {
+        *field = 'H';
+        return true;
+    }
+    if (str_equal_ignore_case(token, "MIN") ||
+        str_equal_ignore_case(token, "MINU") ||
+        str_equal_ignore_case(token, "MINUT") ||
+        str_equal_ignore_case(token, "MINUTE")) {
+        *field = 'M';
+        return true;
+    }
+    if (str_equal_ignore_case(token, "SEC") ||
+        str_equal_ignore_case(token, "SECO") ||
+        str_equal_ignore_case(token, "SECON") ||
+        str_equal_ignore_case(token, "SECOND")) {
+        *field = 'S';
+        return true;
+    }
+    return false;
+}
+
+static bool date_field_token(const char *token, char *field)
+{
+    if (str_equal_ignore_case(token, "Y") ||
+        str_equal_ignore_case(token, "YEAR")) {
+        *field = 'Y';
+        return true;
+    }
+    if (str_equal_ignore_case(token, "MON") ||
+        str_equal_ignore_case(token, "MONT") ||
+        str_equal_ignore_case(token, "MONTH")) {
+        *field = 'M';
+        return true;
+    }
+    if (str_equal_ignore_case(token, "D") ||
+        str_equal_ignore_case(token, "DAY") ||
+        str_equal_ignore_case(token, "DATE")) {
+        *field = 'D';
+        return true;
+    }
+    return false;
+}
+
+static bool parse_time_command_value(const char *text, uint8_t base_hour,
+                                     uint8_t base_minute, uint8_t base_second,
+                                     uint8_t *hour, uint8_t *minute,
+                                     uint8_t *second)
+{
+    const char *p = skip_spaces(text);
+    char fields[3u];
+    char token[12u];
+    uint8_t count = 0u;
+    uint8_t i;
+    uint16_t value;
+
+    if ((*p >= '0') && (*p <= '9')) {
+        return parse_time_value(p, hour, minute, second);
+    }
+
+    while ((*skip_spaces(p) != '\0') &&
+           !((*skip_spaces(p) >= '0') && (*skip_spaces(p) <= '9'))) {
+        if ((count >= 3u) || !read_token(&p, token, sizeof(token)) ||
+            !time_field_token(token, &fields[count])) {
+            return false;
+        }
+        ++count;
+    }
+    if (count == 0u) {
+        return false;
+    }
+
+    *hour = base_hour;
+    *minute = base_minute;
+    *second = base_second;
+    for (i = 0u; i < count; ++i) {
+        if (!read_token(&p, token, sizeof(token))) {
+            return false;
+        }
+        if (fields[i] == 'H') {
+            if (!parse_token_uint(token, 23u, &value)) {
+                return false;
+            }
+            *hour = (uint8_t)value;
+        } else if (fields[i] == 'M') {
+            if (!parse_token_uint(token, 59u, &value)) {
+                return false;
+            }
+            *minute = (uint8_t)value;
+        } else {
+            if (!parse_token_uint(token, 59u, &value)) {
+                return false;
+            }
+            *second = (uint8_t)value;
+        }
+    }
+
+    return *skip_spaces(p) == '\0';
+}
+
+static bool parse_date_command_value(const char *text, uint16_t base_year,
+                                     uint8_t base_month, uint8_t base_day,
+                                     uint16_t *year, uint8_t *month,
+                                     uint8_t *day)
+{
+    const char *p = skip_spaces(text);
+    char fields[3u];
+    char token[12u];
+    uint8_t count = 0u;
+    uint8_t i;
+    uint16_t value;
+
+    if ((*p >= '0') && (*p <= '9')) {
+        return parse_date_value(p, year, month, day);
+    }
+
+    while ((*skip_spaces(p) != '\0') &&
+           !((*skip_spaces(p) >= '0') && (*skip_spaces(p) <= '9'))) {
+        if ((count >= 3u) || !read_token(&p, token, sizeof(token)) ||
+            !date_field_token(token, &fields[count])) {
+            return false;
+        }
+        ++count;
+    }
+    if (count == 0u) {
+        return false;
+    }
+
+    *year = base_year;
+    *month = base_month;
+    *day = base_day;
+    for (i = 0u; i < count; ++i) {
+        if (!read_token(&p, token, sizeof(token))) {
+            return false;
+        }
+        if (fields[i] == 'Y') {
+            if (!parse_token_uint(token, 9999u, &value)) {
+                return false;
+            }
+            *year = (value < 100u) ? (uint16_t)(2000u + value) : value;
+        } else if (fields[i] == 'M') {
+            if (!parse_token_uint(token, 12u, &value) || value < 1u) {
+                return false;
+            }
+            *month = (uint8_t)value;
+        } else {
+            if (!parse_token_uint(token, 31u, &value) || value < 1u) {
+                return false;
+            }
+            *day = (uint8_t)value;
+        }
+    }
+
+    if (*skip_spaces(p) != '\0') {
+        return false;
+    }
+    return (*month >= 1u) && (*month <= 12u) &&
+           (*day >= 1u) && (*day <= days_in_month(*year, *month));
+}
+
 static bool line_payload_after_prefix(const char *line, const char *prefix,
                                       const char **payload)
 {
@@ -1433,7 +1626,9 @@ static void handle_set_command(const char *payload)
     payload = skip_spaces(payload);
 
     if (line_payload_after_prefix(payload, "TIME", &value)) {
-        if (!parse_time_value(value, &hour, &minute, &second)) {
+        if (!parse_time_command_value(value, g_clock.hour, g_clock.minute,
+                                      g_clock.second, &hour, &minute,
+                                      &second)) {
             Board_UartWriteString("ERROR RANGE\r\n");
             return;
         }
@@ -1445,7 +1640,8 @@ static void handle_set_command(const char *payload)
         display_render();
         Board_UartWriteString("OK TIME\r\n");
     } else if (line_payload_after_prefix(payload, "DATE", &value)) {
-        if (!parse_date_value(value, &year, &month, &day)) {
+        if (!parse_date_command_value(value, g_clock.year, g_clock.month,
+                                      g_clock.day, &year, &month, &day)) {
             Board_UartWriteString("ERROR RANGE\r\n");
             return;
         }
@@ -1462,7 +1658,10 @@ static void handle_set_command(const char *payload)
             g_clock.alarm_enabled = false;
             stop_alarm();
             Board_UartWriteString("OK ALARM OFF\r\n");
-        } else if (parse_time_value(value, &hour, &minute, &second)) {
+        } else if (parse_time_command_value(value, g_clock.alarm_hour,
+                                            g_clock.alarm_minute,
+                                            g_clock.alarm_second,
+                                            &hour, &minute, &second)) {
             g_clock.alarm_hour = hour;
             g_clock.alarm_minute = minute;
             g_clock.alarm_second = second;
@@ -1700,7 +1899,9 @@ static void uart_handle_line(char *line)
         handle_get_command(payload);
     } else if (line_payload_after_prefix(line, "*SET:TIME", &payload) ||
                line_payload_after_prefix(line, "TIME", &payload)) {
-        if (parse_time_value(payload, &hour, &minute, &second)) {
+        if (parse_time_command_value(payload, g_clock.hour, g_clock.minute,
+                                     g_clock.second, &hour, &minute,
+                                     &second)) {
             g_clock.hour = hour;
             g_clock.minute = minute;
             g_clock.second = second;
@@ -1713,7 +1914,8 @@ static void uart_handle_line(char *line)
         }
     } else if (line_payload_after_prefix(line, "*SET:DATE", &payload) ||
                line_payload_after_prefix(line, "DATE", &payload)) {
-        if (parse_date_value(payload, &year, &month, &day)) {
+        if (parse_date_command_value(payload, g_clock.year, g_clock.month,
+                                     g_clock.day, &year, &month, &day)) {
             g_clock.year = year;
             g_clock.month = month;
             g_clock.day = day;
