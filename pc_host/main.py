@@ -44,7 +44,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle("S800 Smart Clock PC Host")
         self.resize(1180, 760)
         self.worker = SerialWorker(self)
-        self.pending_tests: list[tuple[str, str]] = []
+        self.pending_tests: list[tuple[str, str, bool]] = []
         self.current_test: tuple[str, str, bool] | None = None
         self.test_results: list[tuple[str, bool, str]] = []
         self.test_serial = 0
@@ -383,7 +383,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ("LED AUTO", "*SET:LED 00", False),
             ("BEEP", "*SET:BEEP 500", False),
             ("KEY DISP", "*SET:KEY DISP", False),
-            ("ERROR", "*SET:BEEP 9999", True),
+            ("BEEP RANGE ERROR", "*SET:BEEP 9999", True),
         ]
         self.test_results = []
         self.current_test = None
@@ -446,11 +446,25 @@ class MainWindow(QtWidgets.QMainWindow):
             self._mark_latest_test(True, line)
         elif isinstance(parsed, ErrorResponse):
             self.log("ERR", line, LOG_ERR)
-            self._mark_latest_test("9999" in line or "ERROR" in line, line)
+            self._mark_latest_test(False, line)
         elif isinstance(parsed, RxEcho):
             self.log("RX", line, LOG_RX)
         elif isinstance(parsed, UnknownLine):
             self.log("RX", line, LOG_RX)
+            self._mark_get_response_if_expected(line)
+
+    def _mark_get_response_if_expected(self, line: str) -> None:
+        if self.current_test is None:
+            return
+        _, command, expect_error = self.current_test
+        if expect_error:
+            return
+        upper_command = command.upper()
+        if not upper_command.startswith("*GET:"):
+            return
+        topic = upper_command.split(":", 1)[1].split()[0]
+        if line.upper().startswith(f"{topic} "):
+            self._mark_latest_test(True, line)
 
     def _mark_latest_test(self, ok: bool, detail: str) -> None:
         if self.current_test is None:
