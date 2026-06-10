@@ -1,0 +1,458 @@
+26     年大作业 MCU 与 PC 端开发要求 V1.0
+     配套《大作业题目-学生版V1.2》与《大作业-软件安装指南V1.1》。
+     版本：V1.0 日期：2026-06-08
+     编程风格：MCU 自编代码集中放 main.c ，底层共用函数放 Inc/ Driverlib/ 。
+                                                           。
+     PC 推荐技术栈：Python 3.11.9 / PyQt5 / pyserial（可选 C#/Qt C++）
+
+
+
+第一部分：MCU 端基础功能
+1.   系统时基 + 软定时器
+接口：
+ volatile uint32_t g_tick_ms;
+ volatile uint8_t     flag_5ms, flag_10ms, flag_100ms, flag_1s;
+ void      SysTick_Handler(void);
+ uint8_t     Tick_TimedOut(uint32_t start, uint32_t span_ms);
+
+
+数据流：SysTick(1ms) → g_tick_ms++ → 按取模设置标志位 → 主循环消费清零
+验收：
+  SysTick 优先级最低
+
+  1 秒走时误差 < 0.1 s
+
+  主循环无 Delay_ms() 阻塞
+常见坑：中断里做"重活"、 g_tick_ms 未加 volatile
+
+2. I2C   七段数码管显示
+接口：
+ #define DISP_LEN 8
+ extern uint8_t disp_buf[DISP_LEN], disp_dp[DISP_LEN], disp_blink_mask, disp_on;
+ void Display_Init(void);
+ void Display_Refresh(void);
+ void Display_SetStr(const char *s, uint8_t dp_bitmap);
+
+
+段码表：数字 0-9、字母 A-Z、符号 - _ °
+验收：
+  I2C 400K 无暗位
+
+  8 位均匀亮度
+
+  静态/闪烁切换无抖动
+常见坑：上一位关断不彻底导致鬼影、FORMAT RIGHT 时小数点用"下一位"规则
+3.   按键扫描
+接口：
+ typedef enum {
+      KEY_NONE=0, KEY_FUNC, KEY_SHIFT, KEY_ADD, KEY_SAVE,
+      KEY_DISP, KEY_SPEED, KEY_FORMAT, KEY_EXT, KEY_USER1, KEY_USER2
+ } key_code_t;
+ typedef enum { KEV_NONE, KEV_DOWN, KEV_UP, KEV_LONG, KEV_REPEAT } key_event_t;
+ void Key_Scan(void);
+ key_event_t Key_GetEvent(key_code_t *out);
+
+
+状态机：IDLE → PRESSED → LONG_PRESSED（防抖 20ms，长按 ≥800ms）
+验收：
+  1 秒内连续按 3 次以上不丢键
+
+  FUNC 长按 ≥800ms 触发 LONG
+
+  USER1/USER2 同样进入键值队列
+
+常见坑：阻塞 delay 防抖、未区分 DOWN/UP 事件
+
+4. UART     接收中断 + 行整理
+接口：
+ #define LINE_MAX 64
+ extern volatile uint8_t rx_line_ready;
+ extern char cmd_line[LINE_MAX];
+ void UART_Init(uint32_t baud);
+ void UART_RxIsrHandler(uint8_t byte);
+
+
+数据流：UART RX ISR → 环形缓冲 → 遇 \r / \n 置位 → 主循环整理（去空格/转大写）→ 分发
+验收：
+     115200, 8N1
+
+  支持 \r 、 \n 、 \r\n
+  粘包/多空格正确整理
+  行长 >64 丢弃并提示 ERROR LINE TOO LONG
+常见坑：中断里处理命令、 *SET:MSG 后内容被误转大写（须保留原文）
+5.   开机画面
+时序（每段 800-1000ms）：
+ 1. 8 LED + 8 数码管全亮→全灭，闪烁≥1 次
+
+ 2. 显示学号后 8 位，闪烁 1 次
+
+ 3. 显示姓名拼音，闪烁 1 次
+
+ 4. 显示版本号 V 1.0 持续 1s
+
+ 5. 进入时钟显示
+
+验收：学号/姓名与提交一致、时长 4-8s
+
+6.   日期/时间显示
+数据结构：
+ typedef struct { uint16_t y; uint8_t m, d, wday; } date_t;
+ typedef struct { uint8_t h, mi, s; } time_t_;
+
+
+显示约定：时间 HH.MM.SS 、日期 YY.MM.DD 或 YYYY.MMDD
+验收：
+  闰年 02/29→03/01 正确
+  月末进位正确
+  23:59:59→00:00:00 正确
+
+
+
+7.   左/右流水显示
+接口：
+ typedef enum { FMT_LEFT, FMT_RIGHT } format_t;
+ void Scroll_Set(const char *text, uint8_t dp_bitmap);
+ void Scroll_Tick(void);
+
+
+算法：维护 scroll_buf[N] （N≥32）+ 偏移指针 off ，边界回绕
+小数点跟随规则：
+  FMT_LEFT：小数点用本位
+
+  FMT_RIGHT：小数点用下一位
+
+速度：500ms/步（慢）/ 250ms/步（快），SPEED 键（K6）切换
+验收：
+  左/右流水正常
+  两级速度可见差异
+     小数点位置切换时立刻调整
+
+8.   闹钟
+数据结构：
+ typedef struct { time_t_ t; uint8_t enabled, ringing; } alarm_t;
+
+
+行为：
+  每秒比对 g_time == g_alarm.t 且 enabled → 响铃
+  节奏式响铃（200ms 响/200ms 停），持续 ≤10 秒自动停止
+  FUNC 立即停止，响铃期间 FUNC 优先于编辑切换
+
+  无贪睡功能（学生版 §3.4 明确不要求）
+验收：
+  到点必响
+  ≤10 秒自动停
+
+  FUNC 立即关
+
+  LED 指示：使能=常亮，响铃=快闪
+
+
+
+9.   编辑有限状态机
+状态机：
+ IDLE → EDIT_DATE → EDIT_TIME → EDIT_ALARM → IDLE（FUNC 短按循环）
+
+
+ 任意 EDIT 状态：
+     SHIFT: 高亮位左移   ADD: 当前字段+1
+     SAVE/FUNC长按: 保存退出   5s无操作: 放弃退出
+
+
+验收：
+        短按循环切换
+     FUNC
+
+  SHIFT 高亮闪烁
+
+  ADD 进位/钳制正确
+
+  5s 无按键自动退出且不保存
+
+常见坑：退出时高亮掩码未清零、编辑期间用 delay 阻塞秒走时
+10.   串口指令完整集
+必须支持的指令：
+ 命令       子命令                                参数
+ *RST     —                                  复位时钟/日期/闹钟，DISP=ON，FORMAT=LEFT
+ *SET     :DATE                              YEAR/MONTH/DATE（单参或组合）
+
+ *SET     :TIME                              HOUR/MINute/SECond
+
+ *SET     :ALARM                             HOUR/MINute/SECond/OFF
+
+ *SET     :DISPlay                           ON/OFF
+
+ *SET     :FORMAT                            LEFT/RIGHT
+
+ *SET     :MSG                               ≤32   字节滚动消息（保留大小写）
+ *SET     :BEEP                              10-5000ms
+
+ *SET     :LED                               2位 HEX
+ *SET     :KEY                               NAME（10 项，执行后不上报 EVT:KEY）
+
+ *SET     :MODE                              DAY/NIGHT
+
+ *GET     :DATE/:TIME/:ALARM/:DISP/:FORMAT   查询
+ *PING    —                                  心跳，应答 *PONG <uptime_s>
+兼容性硬指标：
+   大小写不敏感
+   空格容错（1+ 个空格）
+   缩写：输完大写字母即合法（如 *SET:TIME HOUR MIN SEC ）
+   多参数≥3 种组合
+   错误回应 ERROR SYNTAX/PARAM/RANGE
+FORMAT RIGHT 影响：
+
+   所有 *GET 应答字符串逆序
+   数码管同步逆序，小数点按 §7 规则跟随
+
+11. 8   位 LED 辅助指示
+基础必做（4 类指示）：
+ LED                含义                      频率
+ LED0               系统心跳                    1Hz
+
+ LED1               闹钟使能/响铃                 常亮/快闪
+ LED2               编辑模式                    常亮
+ LED3               UART 收发                 亮 100ms
+扩展选做（天气/NTP，做扩展功能时再启用）：
+ LED                含义                 频率
+ LED4               天气晴                常亮/灭
+ LED5               天气雨雪               1Hz 呼吸
+
+ LED6               高温≥30°C            常亮
+ LED7               NTP 同步             常亮/1Hz/灭
+验收：LED0 1Hz 心跳可见、与按键/显示互不冲突
+ ⚠️ 前 4 位为必做，后 4 位仅在做 E2（天气）/ E1（NTP）时启用，不得以扩展功能替代基础 4 类指示（学生版
+ §6.1 红线）。
+
+MCU     端推荐实现顺序
+             （心跳验证）
+ 1. SysTick → LED
+
+ 2. 数码管驱动（静态→动态）
+
+ 3. 按键扫描（UART 打印验证）
+
+ 4. UART 接收（回显验证）
+
+ 5. 时钟/流水/闹钟
+
+ 6. 编辑 FSM
+
+ 7. 开机画面（复用前述模块）
+
+ 8. 串口指令解析（最难，与 5/6 并行）
+
+
+
+第二部分：MCU 端协同扩展
+12.   滚动消息 *SET:MSG <text>
+协议：PC→MCU，文本≤32 字节，保留原大小写，应答 OK
+行为：
+  ≤8 位：静态显示 2-3 秒后自动返回时钟
+
+  >8 位：自动进入流水模式（无需启停键）
+  流水完整一遍后自动返回时钟
+  流水期间按任意键（除编辑键）立即中断
+验收：大小写保留、LEFT/RIGHT 均正确、流水期间秒不丢
+
+13.   远程蜂鸣 *SET:BEEP <ms>
+协议：10-5000ms，越界 ERROR RANGE
+验收：100/500/2000ms 三档准确（±20ms）、与闹钟不冲突
+
+14.   远程 LED 直控 *SET:LED <hex>
+行为：覆盖默认 LED 含义，收到 00 或 *RST 退出接管
+验收：任意组合可点亮、接管时心跳停止、复位后恢复
+
+15.   天气接收 *SET:WEA <T> <COND>
+协议：温度 -40~+50，天气码 SUN/CLD/OVC/RAI/SNO/FOG
+LED 编码：
+
+    LED4：SUN 常亮
+
+    LED5：RAI/SNO 1Hz 呼吸
+
+    LED6：≥30°C 常亮
+
+闹钟-天气联动：雨雪时多响 3 声、高温时 8LED 慢闪
+
+16.   主动事件上报 *EVT: 系列
+报文清单：
+ 报文                                 触发
+  *EVT:KEY <NAME>                   物理按键（ *SET:KEY 不上报，避免环回）
+  *EVT:ALARM / *EVT:ALARM_OFF       闹钟开始/停止
+  *EVT:EDIT <TYPE> <VALUE>          编辑保存
+  *EVT:DISP <8字符> <dpHex>           显示变化或 1s 心跳
+  *EVT:LED <hex>                    LED 变化或 1s 心跳
+
+  *EVT:MODE <STATE>                 模式切换
+*EVT:DISP   编码：
+   字符定长， _ 填空，不含小数点
+      8
+
+  空格 + 2 位 HEX 表示小数点位图
+  每秒发送一次（即使无变化），1Hz 全量心跳
+验收：PC 镜像延迟<200ms、1s 心跳持续到达
+
+17. NTP     同步状态指示
+状态机：UNSYNCED（LED7 灭）→ SYNCED（常亮）→ DRIFT（>24h，1Hz 慢闪）
+长按 USER1 查询：显示 n.SY.xx 3 秒（n=小时数，SY=标识，xx=状态）
+
+18. USER2        短显天气
+行为：USER2 短按 → 显示 <温度>°C <天气> 5 秒 → 自动返回
+边界：无天气数据时显示 --°C --- 、数据过期闪烁
+
+19. PING/PONG        心跳
+协议：PC→ *PING ，MCU→ *PONG <uptime_s>
+验收：应答时延<50ms、uptime 准确
+
+MCU       协同端常见坑
+      *SET:MSG 被大写整理破坏 → 整理前识别前缀保留原文
+      *EVT:DISP 上报频率过高 → 加变化检测 + 速率限制
+
+      B7 倒计时阻塞秒走时 → 基于 SysTick，不能 delay
+
+      LED 接管与天气/NTP 冲突 → 接管时统一覆盖，退出后恢复
+
+
+
+第三部分：PC 上位机要求
+20.   项目骨架（推荐结构）
+ pc_host/
+ ├── ui/main_window.ui      Qt Designer 设计
+ ├── ui_main_window.py      pyuic5 自动生成
+ ├── main.py                程序入口
+ ├── serial_worker.py       后台串口线程
+ ├── protocol.py            协议解析（可单元测试）
+ ├── twin_panel.py          数字孪生镜像面板
+ ├── ntp_helper.py          NTP 对时
+ ├── weather_helper.py      天气获取
+ ├── requirements.txt       依赖清单
+ └── README.md
+
+
+
+
+21.    串口管理
+功能：
+  自动扫描 COM，默认选中 USB 串口
+  波特率 115200，连接/断开按钮
+  状态指示灯（绿●在线/灰○离线）
+  1Hz 发 *PING ，3s 未收 *PONG 标离线
+
+  状态栏四项：连接状态、FORMAT、MODE、ALARM 使能
+接口：
+ class SerialWorker(QThread):
+        line_received = pyqtSignal(str)
+        connection_changed = pyqtSignal(bool)
+        latency_updated = pyqtSignal(int)
+
+
+验收：拔插 USB 可刷新、断连立即变灰、跨线程不卡 UI
+常见坑：pyserial 无超时 → 用 timeout=0.1 + ring buffer
+
+22.    控制面板
+必须控件：时间/日期/闹钟设置与获取、显示 ON/OFF、方向 LEFT/RIGHT、消息发送、蜂鸣、复位
+多参数演示：日期按钮旁配下拉框（YEAR MONTH DATE / YEAR DATE / MONTH DATE 等≥3 种）
+验收：12 条指令有 UI 入口、参数组合≥3 种、大小写/缩写演示按钮
+
+23.    数字孪生镜像面板（必做核心）
+视觉要求：
+ ┌────── MCU 镜像 ──────┐
+ │     ┌─┬─┬─┬─┬─┬─┬─┬─┐        │   ← 8 位 7SEG（QPainter）
+ │     │8│.│8│.│8│.│8│.│        │
+ │     └─┴─┴─┴─┴─┴─┴─┴─┘        │
+ │      ●   ●   ○   ○   ●   ○   ○   ●   ← 8 LED（QSS 渐变）
+ │     [FUNC] [SHFT] [ADD ] [SAVE]          ← 8 按键
+ │     [USR1] [USR2] [K7        ] [K8   ]
+ └──────────────────────────┘
+
+
+   自绘：QWidget 子类，paintEvent 画 7 段+dp，亮 #FF3030 ，灭 #220000
+7SEG
+
+同步逻辑：
+ MCU   上报                               PC 处理
+  *EVT:DISP                             8 个 7SEG 更新 + 小数点解码
+
+  *EVT:LED                              8 LED 亮灭
+
+  *EVT:KEY                              按钮高亮 200ms
+  *EVT:MODE DAY/NIGHT                   NIGHT 下仅显示时分 4 位
+
+
+USER1/USER2   ：独立可点击控件，与 I2C 8 键视觉区分
+验收：
+  镜像与实物一致（同框验证）
+  点击 FUNC → MCU 进入编辑
+  MCU 按 USER2 → PC 高亮 200ms
+
+  NIGHT 模式仅显示时分 4 位
+
+
+
+24.   收发日志
+要求：QPlainTextEdit，最多 1000 行，格式 [hh:mm:ss.fff] →/← 命令
+颜色编码：发送蓝、应答绿、事件紫、错误红
+验收：方向/颜色/时间戳准确、滚动不卡顿
+
+25. NTP      对时
+流程：点击按钮 → 请求 ntp.aliyun.com → 获取时间 → 下发 *SET:DATE/TIME + *NTP SYNC
+USER1 自动触发（学生版 §4.2 E1 明确要求）  ：
+    PC 须监听 *EVT:KEY USER1 ，收到后自动触发对时
+
+    物理按 USER1 → MCU 上报 → PC 自动拉 NTP
+验收：对时后 MCU 与 PC 相差<1s、断网弹窗、USER1 自动触发
+
+26.   天气获取
+API： wttr.in （免费无 Key）
+调度：启动拉一次、30 分钟刷新、手动更新按钮
+                                  ：
+USER2 短显天气（学生版 §3.7 + §4.2 E2 明确要求）
+
+    按 USER2 → 数码管显示 <温度>°C <天气> 5 秒 → 自动返回时钟
+    无天气数据时显示 --°C ---
+验收：启动 5s 内显示、30 分钟自动刷新、MCU 收到后 LED 更新、USER2 短显正常
+27.   自动昼夜模式
+逻辑：astral 计算当地日出日落 → 跨过 sunrise 发 *SET:MODE DAY ，sunset 发 *SET:MODE NIGHT
+                         ：
+NIGHT 行为（学生版 §4.2 E3 明确要求）
+
+    数码管仅显示时分 4 位
+    LED 仅保留心跳（LED0）
+
+    蜂鸣抑制（闹钟不响）
+UI：复选框（默认开）   、显示当前模式 + 日出/日落时刻
+
+28.   数据可视化看板（加分）
+数据源：持久化事件到 events.csv （ALARM/SYNC/EDIT/KEY）
+图表：闹钟触发分布、NTP delta、按键热度图
+验收：至少 3 种图表、CSV 可用 Excel 打开、数据少时不崩溃
+
+29.   错误提示与异常处理
+ 场景                                 处理
+ 串口被占用                              打开失败 → 弹窗 + 禁用控件
+ MCU 应答 ERROR                       日志红色 + 状态栏
+ 心跳超时                               状态灯变灰 + 重试
+ 网络超时                               弹窗 + 日志
+验收：任何异常不崩溃 GUI、关键错误用户可见
+
+PC    端提交要求
+      源代码完整（含 .ui 文件）
+      requirements.txt ：
+
+
+       PyQt5==5.15.9
+       pyserial>=3.5
+       ntplib>=0.4.0
+       requests>=2.28
+       astral>=3.2
+       matplotlib>=3.5
+
+
+      README.md   （启动命令 + 截图）
+演示视频要点：
+ 双窗口并排：PC 镜像 + MCU 实物
+ 三种双向动作：PC→MCU、MCU→PC、闹钟→PC 弹窗
+
+文档版本：V1.0 日期：2026-06-08
+本协议解析以 03_协议规范.md 为准。
+

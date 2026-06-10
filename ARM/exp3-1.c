@@ -23,7 +23,7 @@
 
 #define SYSTICK_FREQUENCY       1000u
 #define SEG_DIGITS              8u
-#define UART_LINE_MAX           96u
+#define UART_LINE_MAX           64u
 #define MESSAGE_MAX             32u
 #define BOOT_STEP_MS            700u
 #define VERSION_STEP_MS         1000u
@@ -54,12 +54,13 @@
 
 #define LED_HEARTBEAT           0x01u
 #define LED_ALARM_ENABLED       0x02u
-#define LED_ALARM_RINGING       0x04u
-#define LED_EDITING             0x08u
-#define LED_UART_ACTIVITY       0x10u
-#define LED_KEY_ACTIVITY        0x20u
-#define LED_MESSAGE             0x40u
-#define LED_FORMAT_RIGHT        0x80u
+#define LED_ALARM_RINGING       0x02u
+#define LED_EDITING             0x04u
+#define LED_UART_ACTIVITY       0x08u
+#define LED_WEATHER_SUN         0x10u
+#define LED_WEATHER_RAIN        0x20u
+#define LED_WEATHER_HOT         0x40u
+#define LED_NTP_SYNC            0x80u
 
 typedef enum {
     DISPLAY_TIME = 0,
@@ -122,6 +123,8 @@ typedef struct {
     uint32_t alarm_started_ms;
     uint32_t last_alarm_toggle_ms;
     bool buzzer_on;
+    bool remote_beep_active;
+    uint32_t remote_beep_until_ms;
 
     DisplayMode display_mode;
     EditMode edit_mode;
@@ -129,8 +132,16 @@ typedef struct {
     ScrollDirection scroll_dir;
     ScrollSpeed scroll_speed;
     bool format_right;
+    bool display_on;
+    bool mode_night;
     bool events_enabled;
     bool heartbeat_on;
+    bool led_override_enabled;
+    uint8_t led_override_value;
+    bool ntp_synced;
+    bool weather_valid;
+    int8_t weather_temp;
+    char weather_code[4u];
 
     uint8_t led_state;
     uint32_t last_tick_ms;
@@ -153,6 +164,7 @@ static void Board_UartWriteByte(uint8_t byte);
 static void Board_UartWriteString(const char *text);
 static void Board_BuzzerWrite(bool on);
 static void display_text_8(const char *text, uint8_t dp_mask);
+static void apply_buzzer_output(void);
 
 static void S800_GPIO_Init(void);
 static void S800_I2C0_Init(void);
@@ -172,6 +184,9 @@ static volatile uint8_t g_uart_activity_ms;
 static volatile uint8_t g_key_activity_ms;
 
 static uint32_t g_sys_clock;
+static char g_display_chars[SEG_DIGITS];
+static uint8_t g_display_dp_mask;
+static bool g_suppress_key_event;
 
 static ClockState g_clock;
 
@@ -336,6 +351,107 @@ static uint8_t text_len(const char *text)
         ++len;
     }
     return len;
+}
+
+static bool parse_uint_range(const char **text, uint8_t min_digits,
+                             uint8_t max_digits, uint16_t max_value,
+                             uint16_t *value);
+
+static bool parse_uint_value(const char *text, uint16_t min_value,
+                             uint16_t max_value, uint16_t *value)
+{
+    const char *p = text;
+    uint16_t parsed;
+
+    if (!parse_uint_range(&p, 1u, 5u, max_value, &parsed)) {
+        return false;
+    }
+    p = skip_spaces(p);
+    if ((*p != '\0') || (parsed < min_value)) {
+        return false;
+    }
+
+    *value = parsed;
+    return true;
+}
+
+static bool parse_hex_byte(const char *text, uint8_t *value)
+{
+    const char *p = skip_spaces(text);
+    uint8_t i;
+    uint8_t result = 0u;
+
+    if ((p[0] == '0') && ((p[1] == 'x') || (p[1] == 'X'))) {
+        p += 2;
+    }
+
+    for (i = 0u; i < 2u; ++i) {
+        char ch = ascii_upper(*p);
+        uint8_t nibble;
+        if ((ch >= '0') && (ch <= '9')) {
+            nibble = (uint8_t)(ch - '0');
+        } else if ((ch >= 'A') && (ch <= 'F')) {
+            nibble = (uint8_t)(ch - 'A' + 10);
+        } else {
+            return false;
+        }
+        result = (uint8_t)((result << 4) | nibble);
+        ++p;
+    }
+
+    p = skip_spaces(p);
+    if (*p != '\0') {
+        return false;
+    }
+
+    *value = result;
+    return true;
+}
+
+static bool parse_weather_payload(const char *text, int8_t *temp,
+                                  char code[4u])
+{
+    const char *p = skip_spaces(text);
+    bool neg = false;
+    uint16_t raw;
+    uint8_t i = 0u;
+
+    if (*p == '-') {
+        neg = true;
+        ++p;
+    } else if (*p == '+') {
+        ++p;
+    }
+
+    if (!parse_uint_range(&p, 1u, 2u, 50u, &raw)) {
+        return false;
+    }
+    if ((neg && raw > 40u) || (!neg && raw > 50u)) {
+        return false;
+    }
+
+    p = skip_spaces(p);
+    while ((i < 3u) && (p[i] != '\0') && (p[i] != ' ') && (p[i] != '\t')) {
+        code[i] = ascii_upper(p[i]);
+        ++i;
+    }
+    code[i] = '\0';
+    p = skip_spaces(&p[i]);
+    if ((*p != '\0') || (i == 0u)) {
+        return false;
+    }
+
+    if (!(str_equal_ignore_case(code, "SUN") ||
+          str_equal_ignore_case(code, "CLD") ||
+          str_equal_ignore_case(code, "OVC") ||
+          str_equal_ignore_case(code, "RAI") ||
+          str_equal_ignore_case(code, "SNO") ||
+          str_equal_ignore_case(code, "FOG"))) {
+        return false;
+    }
+
+    *temp = neg ? (int8_t)(-(int16_t)raw) : (int8_t)raw;
+    return true;
 }
 
 static bool is_token_left(const char *text)
@@ -626,6 +742,23 @@ static void display_render(void)
     uint8_t dp_mask = 0u;
 
     fill_blank(chars);
+    if (!g_clock.display_on) {
+        Board_Seg7Show(chars, 0u);
+        return;
+    }
+
+    if (g_clock.mode_night && (g_clock.edit_mode == EDIT_NONE) &&
+        !g_clock.alarm_ringing) {
+        chars[0] = digit_u8(g_clock.hour, 1u);
+        chars[1] = digit_u8(g_clock.hour, 0u);
+        chars[2] = digit_u8(g_clock.minute, 1u);
+        chars[3] = digit_u8(g_clock.minute, 0u);
+        dp_mask = (uint8_t)(1u << 1u);
+        apply_format(chars, &dp_mask);
+        Board_Seg7Show(chars, dp_mask);
+        return;
+    }
+
     if (g_clock.alarm_ringing && ((Board_Millis() / 250u) & 1u)) {
         display_text_8("ALARM   ", 0u);
         return;
@@ -721,6 +854,13 @@ static void uart_write_u16_4(uint16_t value)
     Board_UartWriteByte((uint8_t)('0' + (value % 10u)));
 }
 
+static void uart_write_hex2(uint8_t value)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    Board_UartWriteByte((uint8_t)hex[(value >> 4) & 0x0fu]);
+    Board_UartWriteByte((uint8_t)hex[value & 0x0fu]);
+}
+
 static void uart_print_time(void)
 {
     Board_UartWriteString("TIME ");
@@ -757,16 +897,15 @@ static void uart_print_alarm(void)
 
 static void uart_print_led(void)
 {
-    static const char hex[] = "0123456789ABCDEF";
-    Board_UartWriteString("LED 0x");
-    Board_UartWriteByte((uint8_t)hex[(g_clock.led_state >> 4) & 0x0fu]);
-    Board_UartWriteByte((uint8_t)hex[g_clock.led_state & 0x0fu]);
+    Board_UartWriteString("LED ");
+    uart_write_hex2(g_clock.led_state);
     Board_UartWriteString("\r\n");
 }
 
 static void uart_print_disp_status(void)
 {
     Board_UartWriteString("DISP ");
+    Board_UartWriteString(g_clock.display_on ? "ON " : "OFF ");
     if (g_clock.display_mode == DISPLAY_DATE_SHORT) {
         Board_UartWriteString("DATE ");
     } else if (g_clock.display_mode == DISPLAY_DATE_LONG) {
@@ -781,25 +920,30 @@ static void uart_print_disp_status(void)
 
 static void uart_print_disp_event(void)
 {
+    uint8_t i;
+
     if (!g_clock.events_enabled) {
         return;
     }
 
-    Board_UartWriteString("*EVT:");
-    uart_print_disp_status();
+    Board_UartWriteString("*EVT:DISP ");
+    for (i = 0u; i < SEG_DIGITS; ++i) {
+        char ch = g_display_chars[i];
+        Board_UartWriteByte((uint8_t)((ch == ' ') ? '_' : ch));
+    }
+    Board_UartWriteByte(' ');
+    uart_write_hex2(g_display_dp_mask);
+    Board_UartWriteString("\r\n");
 }
 
 static void uart_print_led_event(void)
 {
-    static const char hex[] = "0123456789ABCDEF";
-
     if (!g_clock.events_enabled) {
         return;
     }
 
-    Board_UartWriteString("*EVT:LED 0x");
-    Board_UartWriteByte((uint8_t)hex[(g_clock.led_state >> 4) & 0x0fu]);
-    Board_UartWriteByte((uint8_t)hex[g_clock.led_state & 0x0fu]);
+    Board_UartWriteString("*EVT:LED ");
+    uart_write_hex2(g_clock.led_state);
     Board_UartWriteString("\r\n");
 }
 
@@ -810,24 +954,64 @@ static void uart_print_mode_event(void)
     }
 
     Board_UartWriteString("*EVT:MODE ");
-    if (g_clock.edit_mode == EDIT_TIME) {
-        Board_UartWriteString("EDIT_TIME\r\n");
-    } else if (g_clock.edit_mode == EDIT_DATE) {
-        Board_UartWriteString("EDIT_DATE\r\n");
-    } else if (g_clock.edit_mode == EDIT_ALARM) {
-        Board_UartWriteString("EDIT_ALARM\r\n");
-    } else {
-        Board_UartWriteString("NORMAL\r\n");
+    Board_UartWriteString(g_clock.mode_night ? "NIGHT\r\n" : "DAY\r\n");
+}
+
+static void uart_print_edit_saved_event(EditMode mode)
+{
+    if (!g_clock.events_enabled) {
+        return;
     }
+
+    Board_UartWriteString("*EVT:EDIT ");
+    if (mode == EDIT_DATE) {
+        Board_UartWriteString("DATE ");
+        uart_write_u16_4(g_clock.year);
+        Board_UartWriteByte('.');
+        uart_write_u8_2(g_clock.month);
+        Board_UartWriteByte('.');
+        uart_write_u8_2(g_clock.day);
+    } else if (mode == EDIT_ALARM) {
+        Board_UartWriteString("ALARM ");
+        uart_write_u8_2(g_clock.alarm_hour);
+        Board_UartWriteByte('.');
+        uart_write_u8_2(g_clock.alarm_minute);
+        Board_UartWriteByte('.');
+        uart_write_u8_2(g_clock.alarm_second);
+    } else {
+        Board_UartWriteString("TIME ");
+        uart_write_u8_2(g_clock.hour);
+        Board_UartWriteByte('.');
+        uart_write_u8_2(g_clock.minute);
+        Board_UartWriteByte('.');
+        uart_write_u8_2(g_clock.second);
+    }
+    Board_UartWriteString("\r\n");
 }
 
 static void update_leds(void)
 {
     uint8_t led = 0u;
 
+    if (g_clock.led_override_enabled) {
+        if (g_clock.led_state != g_clock.led_override_value) {
+            g_clock.led_state = g_clock.led_override_value;
+            Board_LedWrite(g_clock.led_state);
+        }
+        return;
+    }
+
     if (g_clock.heartbeat_on) {
         led |= LED_HEARTBEAT;
     }
+    if (g_clock.mode_night) {
+        if (led != g_clock.led_state) {
+            g_clock.led_state = led;
+            Board_LedWrite(led);
+        }
+        return;
+    }
+
     if (g_clock.alarm_enabled) {
         led |= LED_ALARM_ENABLED;
     }
@@ -840,14 +1024,20 @@ static void update_leds(void)
     if (g_uart_activity_ms != 0u) {
         led |= LED_UART_ACTIVITY;
     }
-    if (g_key_activity_ms != 0u) {
-        led |= LED_KEY_ACTIVITY;
+    if (g_clock.weather_valid &&
+        (str_equal_ignore_case(g_clock.weather_code, "SUN"))) {
+        led |= LED_WEATHER_SUN;
     }
-    if (g_clock.display_mode == DISPLAY_MESSAGE) {
-        led |= LED_MESSAGE;
+    if (g_clock.weather_valid &&
+        (str_equal_ignore_case(g_clock.weather_code, "RAI") ||
+         str_equal_ignore_case(g_clock.weather_code, "SNO"))) {
+        led |= LED_WEATHER_RAIN;
     }
-    if (g_clock.format_right) {
-        led |= LED_FORMAT_RIGHT;
+    if (g_clock.weather_valid && (g_clock.weather_temp >= 30)) {
+        led |= LED_WEATHER_HOT;
+    }
+    if (g_clock.ntp_synced) {
+        led |= LED_NTP_SYNC;
     }
 
     if (led != g_clock.led_state) {
@@ -861,14 +1051,23 @@ static void set_edit_mode(EditMode mode)
     g_clock.edit_mode = mode;
     g_clock.edit_field = FIELD_0;
     g_clock.last_edit_ms = Board_Millis();
-    uart_print_mode_event();
+}
+
+static void apply_buzzer_output(void)
+{
+    Board_BuzzerWrite(g_clock.buzzer_on || g_clock.remote_beep_active);
 }
 
 static void stop_alarm(void)
 {
+    bool was_ringing = g_clock.alarm_ringing;
+
     g_clock.alarm_ringing = false;
     g_clock.buzzer_on = false;
-    Board_BuzzerWrite(false);
+    apply_buzzer_output();
+    if (was_ringing && g_clock.events_enabled) {
+        Board_UartWriteString("*EVT:ALARM_OFF\r\n");
+    }
 }
 
 static void next_display_mode(void)
@@ -932,10 +1131,10 @@ static void edit_add_current_field(void)
 static void handle_key_press(KeyId key)
 {
     g_key_activity_ms = 120u;
-    if (g_clock.events_enabled) {
+    if (g_clock.events_enabled && !g_suppress_key_event) {
         Board_UartWriteString("*EVT:KEY ");
         Board_UartWriteString(key_name(key));
-        Board_UartWriteString(" DOWN\r\n");
+        Board_UartWriteString("\r\n");
     }
 
     if (g_clock.alarm_ringing && key == KEY_FUNC) {
@@ -963,7 +1162,9 @@ static void handle_key_press(KeyId key)
         edit_add_current_field();
     } else if (key == KEY_SAVE) {
         if (g_clock.edit_mode != EDIT_NONE) {
+            EditMode saved_mode = g_clock.edit_mode;
             set_edit_mode(EDIT_NONE);
+            uart_print_edit_saved_event(saved_mode);
             Board_UartWriteString("OK SAVE\r\n");
         }
     } else if (key == KEY_DISP) {
@@ -977,13 +1178,28 @@ static void handle_key_press(KeyId key)
         display_render();
         Board_UartWriteString("OK FORMAT\r\n");
     } else if (key == KEY_EXT) {
-        Board_UartWriteString("*EVT:KEY EXT ACTION\r\n");
+        /* Reserved physical key: the event itself is enough for PC-side use. */
     } else if (key == KEY_USER1) {
-        Board_UartWriteString("*EVT:KEY USER1 SYNC_REQUEST\r\n");
+        /* PC listens to USER1 and starts NTP sync. */
     } else if (key == KEY_USER2) {
         g_clock.display_mode = DISPLAY_MESSAGE;
-        copy_text(g_clock.message, sizeof(g_clock.message), "WEATHER WAIT");
-        Board_UartWriteString("*EVT:KEY USER2 WEATHER\r\n");
+        if (g_clock.weather_valid) {
+            g_clock.message[0] = (g_clock.weather_temp < 0) ? '-' : '+';
+            g_clock.message[1] = digit_u8((uint8_t)((g_clock.weather_temp < 0) ?
+                                                      -g_clock.weather_temp :
+                                                      g_clock.weather_temp), 1u);
+            g_clock.message[2] = digit_u8((uint8_t)((g_clock.weather_temp < 0) ?
+                                                      -g_clock.weather_temp :
+                                                      g_clock.weather_temp), 0u);
+            g_clock.message[3] = 'C';
+            g_clock.message[4] = ' ';
+            g_clock.message[5] = g_clock.weather_code[0];
+            g_clock.message[6] = g_clock.weather_code[1];
+            g_clock.message[7] = g_clock.weather_code[2];
+            g_clock.message[8] = '\0';
+        } else {
+            copy_text(g_clock.message, sizeof(g_clock.message), "--C ---");
+        }
     }
 
     display_render();
@@ -991,11 +1207,14 @@ static void handle_key_press(KeyId key)
 
 static void handle_key_release(KeyId key)
 {
+    (void)key;
+#if 0
     if (g_clock.events_enabled) {
         Board_UartWriteString("*EVT:KEY ");
         Board_UartWriteString(key_name(key));
         Board_UartWriteString(" UP\r\n");
     }
+#endif
 }
 
 static void keys_poll(void)
@@ -1059,9 +1278,9 @@ static void alarm_poll(void)
         g_clock.alarm_started_ms = now;
         g_clock.last_alarm_toggle_ms = now;
         g_clock.buzzer_on = true;
-        Board_BuzzerWrite(true);
+        apply_buzzer_output();
         if (g_clock.events_enabled) {
-            Board_UartWriteString("*EVT:MODE ALARM_RING\r\n");
+            Board_UartWriteString("*EVT:ALARM\r\n");
         }
     }
 
@@ -1077,7 +1296,16 @@ static void alarm_poll(void)
     if ((uint32_t)(now - g_clock.last_alarm_toggle_ms) >= 250u) {
         g_clock.last_alarm_toggle_ms = now;
         g_clock.buzzer_on = !g_clock.buzzer_on;
-        Board_BuzzerWrite(g_clock.buzzer_on);
+        apply_buzzer_output();
+    }
+}
+
+static void remote_beep_poll(void)
+{
+    if (g_clock.remote_beep_active &&
+        ((uint32_t)(Board_Millis() - g_clock.remote_beep_until_ms) < 0x80000000u)) {
+        g_clock.remote_beep_active = false;
+        apply_buzzer_output();
     }
 }
 
@@ -1144,6 +1372,7 @@ static void state_poll(void)
     keys_poll();
     edit_timeout_poll();
     alarm_poll();
+    remote_beep_poll();
     scroll_poll();
     event_poll();
     update_leds();
@@ -1163,13 +1392,23 @@ static void reset_state(void)
     g_clock.alarm_second = 0u;
     g_clock.alarm_enabled = false;
     stop_alarm();
+    g_clock.remote_beep_active = false;
+    g_clock.remote_beep_until_ms = 0u;
     g_clock.display_mode = DISPLAY_TIME;
     g_clock.edit_mode = EDIT_NONE;
     g_clock.edit_field = FIELD_0;
     g_clock.scroll_dir = SCROLL_LEFT;
     g_clock.scroll_speed = SPEED_SLOW;
     g_clock.format_right = false;
-    g_clock.events_enabled = false;
+    g_clock.display_on = true;
+    g_clock.mode_night = false;
+    g_clock.events_enabled = true;
+    g_clock.led_override_enabled = false;
+    g_clock.led_override_value = 0u;
+    g_clock.ntp_synced = false;
+    g_clock.weather_valid = false;
+    g_clock.weather_temp = 0;
+    copy_text(g_clock.weather_code, sizeof(g_clock.weather_code), "---");
     g_clock.scroll_index = 0u;
     g_clock.last_tick_ms = Board_Millis();
     g_clock.last_event_ms = g_clock.last_tick_ms;
@@ -1186,6 +1425,10 @@ static void handle_set_command(const char *payload)
     uint16_t year;
     uint8_t month;
     uint8_t day;
+    uint16_t number;
+    uint8_t hex_value;
+    int8_t temp_value;
+    char weather_code[4u];
 
     payload = skip_spaces(payload);
 
@@ -1230,19 +1473,31 @@ static void handle_set_command(const char *payload)
         }
     } else if (line_payload_after_prefix(payload, "BEEP", &value) ||
                line_payload_after_prefix(payload, "BUZZ", &value)) {
-        if (is_token_on(value)) {
-            g_clock.buzzer_on = true;
-            Board_BuzzerWrite(true);
-            Board_UartWriteString("OK BEEP ON\r\n");
+        if (parse_uint_value(value, 10u, 5000u, &number)) {
+            g_clock.remote_beep_active = true;
+            g_clock.remote_beep_until_ms =
+                (uint32_t)(Board_Millis() + (uint32_t)number);
+            apply_buzzer_output();
+            Board_UartWriteString("OK BEEP\r\n");
+        } else if (is_token_on(value)) {
+            g_clock.remote_beep_active = true;
+            g_clock.remote_beep_until_ms =
+                (uint32_t)(Board_Millis() + 1000u);
+            apply_buzzer_output();
+            Board_UartWriteString("OK BEEP\r\n");
         } else if (is_token_off(value)) {
-            g_clock.buzzer_on = false;
-            Board_BuzzerWrite(false);
-            Board_UartWriteString("OK BEEP OFF\r\n");
+            g_clock.remote_beep_active = false;
+            apply_buzzer_output();
+            Board_UartWriteString("OK BEEP\r\n");
         } else {
-            Board_UartWriteString("ERROR PARAM\r\n");
+            Board_UartWriteString("ERROR RANGE\r\n");
         }
     } else if (line_payload_after_prefix(payload, "DISP", &value)) {
-        if (str_equal_ignore_case(value, "TIME")) {
+        if (is_token_on(value)) {
+            g_clock.display_on = true;
+        } else if (is_token_off(value)) {
+            g_clock.display_on = false;
+        } else if (str_equal_ignore_case(value, "TIME")) {
             g_clock.display_mode = DISPLAY_TIME;
         } else if (str_equal_ignore_case(value, "DATE")) {
             g_clock.display_mode = DISPLAY_DATE_SHORT;
@@ -1257,6 +1512,45 @@ static void handle_set_command(const char *payload)
         }
         display_render();
         Board_UartWriteString("OK DISP\r\n");
+    } else if (line_payload_after_prefix(payload, "LED", &value)) {
+        if (!parse_hex_byte(value, &hex_value)) {
+            Board_UartWriteString("ERROR PARAM\r\n");
+            return;
+        }
+        if (hex_value == 0u) {
+            g_clock.led_override_enabled = false;
+            Board_UartWriteString("OK LED AUTO\r\n");
+        } else {
+            g_clock.led_override_enabled = true;
+            g_clock.led_override_value = hex_value;
+            update_leds();
+            Board_UartWriteString("OK LED\r\n");
+        }
+    } else if (line_payload_after_prefix(payload, "MODE", &value)) {
+        if (str_equal_ignore_case(value, "DAY")) {
+            g_clock.mode_night = false;
+        } else if (str_equal_ignore_case(value, "NIGHT")) {
+            g_clock.mode_night = true;
+        } else {
+            Board_UartWriteString("ERROR PARAM\r\n");
+            return;
+        }
+        display_render();
+        update_leds();
+        uart_print_mode_event();
+        Board_UartWriteString("OK MODE\r\n");
+    } else if (line_payload_after_prefix(payload, "WEA", &value) ||
+               line_payload_after_prefix(payload, "WEATHER", &value)) {
+        if (!parse_weather_payload(value, &temp_value, weather_code)) {
+            Board_UartWriteString("ERROR PARAM\r\n");
+            return;
+        }
+        g_clock.weather_valid = true;
+        g_clock.weather_temp = temp_value;
+        copy_text(g_clock.weather_code, sizeof(g_clock.weather_code),
+                  weather_code);
+        update_leds();
+        Board_UartWriteString("OK WEA\r\n");
     } else if (line_payload_after_prefix(payload, "FORMAT", &value)) {
         if (is_token_left(value)) {
             g_clock.format_right = false;
@@ -1307,6 +1601,7 @@ static void handle_set_command(const char *payload)
         display_render();
         Board_UartWriteString("OK MSG\r\n");
     } else if (line_payload_after_prefix(payload, "KEY", &value)) {
+        g_suppress_key_event = true;
         if (str_equal_ignore_case(value, "FUNC")) {
             handle_key_press(KEY_FUNC);
         } else if (str_equal_ignore_case(value, "SHIFT")) {
@@ -1328,9 +1623,11 @@ static void handle_set_command(const char *payload)
         } else if (str_equal_ignore_case(value, "USER2")) {
             handle_key_press(KEY_USER2);
         } else {
+            g_suppress_key_event = false;
             Board_UartWriteString("ERROR PARAM\r\n");
             return;
         }
+        g_suppress_key_event = false;
         Board_UartWriteString("OK KEY\r\n");
     } else {
         Board_UartWriteString("ERROR SYNTAX\r\n");
@@ -1351,6 +1648,12 @@ static void handle_get_command(const char *payload)
         uart_print_led();
     } else if (str_equal_ignore_case(payload, "DISP")) {
         uart_print_disp_status();
+    } else if (str_equal_ignore_case(payload, "FORMAT")) {
+        Board_UartWriteString("FORMAT ");
+        Board_UartWriteString(g_clock.format_right ? "RIGHT\r\n" : "LEFT\r\n");
+    } else if (str_equal_ignore_case(payload, "MODE")) {
+        Board_UartWriteString("MODE ");
+        Board_UartWriteString(g_clock.mode_night ? "NIGHT\r\n" : "DAY\r\n");
     } else if (str_equal_ignore_case(payload, "MSG") ||
                str_equal_ignore_case(payload, "MESSAGE")) {
         Board_UartWriteString("MSG ");
@@ -1377,11 +1680,18 @@ static void uart_handle_line(char *line)
     Board_UartWriteString("\r\n");
 
     if (str_equal_ignore_case(line, "*PING")) {
-        Board_UartWriteString("*PONG 0\r\n");
+        Board_UartWriteString("*PONG ");
+        uart_write_u16_4((uint16_t)((Board_Millis() / 1000u) % 10000u));
+        Board_UartWriteString("\r\n");
     } else if (str_equal_ignore_case(line, "*RST") ||
                str_equal_ignore_case(line, "RST")) {
         reset_state();
         Board_UartWriteString("OK RST\r\n");
+    } else if (str_equal_ignore_case(line, "*NTP SYNC") ||
+               str_equal_ignore_case(line, "NTP SYNC")) {
+        g_clock.ntp_synced = true;
+        update_leds();
+        Board_UartWriteString("OK NTP\r\n");
     } else if (line_payload_after_prefix(line, "*SET", &payload) ||
                line_payload_after_prefix(line, "SET", &payload)) {
         handle_set_command(payload);
@@ -1457,7 +1767,7 @@ static void uart_poll(void)
             g_uart_line[g_uart_len++] = (char)byte;
         } else {
             g_uart_len = 0u;
-            Board_UartWriteString("\r\nERROR LEN\r\n");
+            Board_UartWriteString("\r\nERROR LINE TOO LONG\r\n");
             Board_UartWriteString(UART_PROMPT);
         }
     }
@@ -1571,8 +1881,10 @@ static void Board_Seg7Show(const char chars[SEG_DIGITS], uint8_t dp_mask)
 {
     uint8_t i;
 
+    g_display_dp_mask = dp_mask;
     for (i = 0u; i < SEG_DIGITS; ++i) {
         uint8_t value = char_to_seg(chars[i]);
+        g_display_chars[i] = chars[i];
         if ((dp_mask & (uint8_t)(1u << i)) != 0u) {
             value |= 0x80u;
         }

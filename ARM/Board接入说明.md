@@ -101,8 +101,14 @@ no flow control
 *SET SPEED=FAST
 *SET EVT=ON
 *SET EVT=OFF
-*SET BEEP=ON
+*SET BEEP=500
 *SET BEEP=OFF
+*SET LED=3F
+*SET LED=00
+*SET MODE=NIGHT
+*SET MODE=DAY
+*SET WEA=31 SUN
+*NTP SYNC
 DISP
 AT+CLASS
 AT+STUDENTCODE
@@ -124,8 +130,12 @@ AT+STUDENTCODE
 - `*SET MSG=...` 进入消息流水显示。
 - `*SET FORMAT=LEFT/RIGHT` 切换正常/反向显示。
 - `*SET SPEED=SLOW/FAST` 切换流水速度。
-- `*SET EVT=ON/OFF` 打开或关闭每秒主动上报。第二周调试版默认关闭，避免 SSCOM 刷屏。
-- `*SET BEEP=ON/OFF` 打开或关闭真实蜂鸣器 PWM 输出。
+- `*SET EVT=ON/OFF` 打开或关闭每秒主动上报。第三周 PC 镜像需要保持开启；SSCOM 手动调试时可临时关闭。
+- `*SET BEEP=<ms>` 按 10-5000 ms 打开真实蜂鸣器 PWM 输出；`OFF` 可手动停止远程蜂鸣。
+- `*SET LED=<hex2>` 接管 8 位 LED；`00` 或 `*RST` 退出接管。
+- `*SET MODE=DAY/NIGHT` 切换昼夜模式。
+- `*SET WEA=<T> <COND>` 下发天气，天气码支持 `SUN/CLD/OVC/RAI/SNO/FOG`。
+- `*NTP SYNC` 记录 PC NTP 对时成功并点亮 NTP 状态 LED。
 
 简写也可用：
 
@@ -139,7 +149,7 @@ MSG=HELLO
 如果返回 `ERROR PARAM`，通常是参数名或参数值不支持。
 如果返回 `ERROR RANGE`，通常是时间/日期越界，例如 `2026-02-30`。
 
-第二周版本支持每秒主动输出，但默认关闭。需要 PC 镜像同步时，先发送：
+第三周协议版本默认每秒主动输出。若之前手动关闭过，PC 镜像同步前可发送：
 
 ```text
 *SET EVT=ON
@@ -206,11 +216,11 @@ MSG=HELLO
 重新 Build/Download 后，可在 SSCOM 中直接测试：
 
 ```text
-*SET BEEP=ON
+*SET BEEP=500
 *SET BEEP=OFF
 ```
 
-如果 `*SET BEEP=ON` 仍没有声音，优先检查 Keil 工程是否启用了最新 `exp3-1.c`，以及工程里是否正确包含 `driverlib\rvmdk\driverlib.lib`。
+如果 `*SET BEEP=500` 仍没有声音，优先检查 Keil 工程是否启用了最新 `exp3-1.c`，以及工程里是否正确包含 `driverlib\rvmdk\driverlib.lib`。
  
 
 ## 需要你确认/修改
