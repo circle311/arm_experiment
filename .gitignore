@@ -27,6 +27,9 @@ Desktop.ini
 _ocr_text/
 _pdf_pages/
 OcrPages.exe
+pc_host/events.csv
+pc_host/events_chart.png
+pc_host/pc_host_log.html
 
 # Keil generated/local files
 ARM/Objects/

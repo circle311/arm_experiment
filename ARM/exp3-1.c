@@ -2296,6 +2296,7 @@ void SysTick_Handler(void)
     g_ms++;
 
     digit_select = (uint8_t)(1u << g_seg_scan_index);
+    (void)I2C0_WriteByte(TCA6424_I2CADDR, TCA6424_OUTPUT_PORT2, 0x00u);
     (void)I2C0_WriteByte(TCA6424_I2CADDR, TCA6424_OUTPUT_PORT1,
                          g_seg_shadow[g_seg_scan_index]);
     (void)I2C0_WriteByte(TCA6424_I2CADDR, TCA6424_OUTPUT_PORT2, digit_select);

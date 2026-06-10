@@ -1,86 +1,111 @@
-# 智能联网时钟系统 - 第一周基线
+# S800 Smart Network Clock
 
-本仓库当前完成第一周目标所需的 MCU 业务代码骨架，核心代码位于：
+This repository contains the MCU firmware and the Python/PyQt5 PC host for the S800 smart clock coursework.
 
-- `mcu/src/main.c`
+## Current Status
 
-当前工作区没有课程提供的 S800/Keil 底层驱动工程，因此 `main.c` 中保留了一组弱定义硬件适配函数。将代码迁入真实 S800 工程时，只需要把这些函数替换为课程实验阶段已经验证过的驱动调用。
+- MCU firmware: `ARM/exp3-1.c`
+- Keil project: `ARM/exp3.uvprojx`
+- PC host: `pc_host/main.py`
+- Work log: `工作日志.md`
+- Latest requirement alignment: `docs/新资料对照与第三周计划.md`
 
-## 第一周已覆盖目标
+## MCU Build
 
-- 上电开机画面：
-  - 8 位数码管 + 8 位 LED 全亮/全灭。
-  - 显示学号后 8 位。
-  - 显示姓名拼音。
-  - 显示版本号。
-- 正常走时：
-  - 基于 1 ms 系统时基累计秒。
-  - 支持年月日进位。
-  - 支持闰年。
-- 日期/时间显示：
-  - 默认显示 `HH.MM.SS`。
-  - 串口输入 `DISP` 可在时间、短日期、长日期之间切换。
-- UART 行接收：
-  - 接收一行命令。
-  - 回显输入内容。
-  - 支持 `*PING`、`*GET:TIME`、`*GET:DATE`、`DISP`。
+Open `ARM/exp3.uvprojx` in Keil, build, and download to the board.
 
-## 需要接入的底层函数
+Useful SSCOM checks:
 
-在真实 S800 工程中，请用驱动库实现或替换以下函数：
-
-```c
-void Board_Init(void);
-uint32_t Board_Millis(void);
-void Board_DelayMs(uint32_t ms);
-void Board_Seg7Show(const char chars[8], uint8_t dp_mask);
-void Board_LedWrite(uint8_t value);
-bool Board_UartReadByte(uint8_t *byte);
-void Board_UartWriteByte(uint8_t byte);
-void Board_UartWriteString(const char *text);
+```text
+*PING
+*SET:TIME HOUR MIN SEC 19 56 00
+*SET:BEEP 500
+*SET:LED 3F
+*SET:LED 00
+*SET:MODE NIGHT
+*SET:MODE DAY
+*SET:WEA 31 SUN
+*NTP SYNC
 ```
 
-建议映射方式：
+Expected highlights:
 
-| 适配函数 | 真实硬件含义 |
-|---|---|
-| `Board_Init` | 初始化系统时钟、SysTick、数码管、LED、UART |
-| `Board_Millis` | 返回系统启动后的毫秒数 |
-| `Board_DelayMs` | 毫秒延时 |
-| `Board_Seg7Show` | 刷新 8 位数码管字符和小数点 |
-| `Board_LedWrite` | 写 8 位 LED 状态 |
-| `Board_UartReadByte` | 非阻塞读取 1 字节 UART 数据 |
-| `Board_UartWriteByte` | UART 发送 1 字节 |
-| `Board_UartWriteString` | UART 发送字符串 |
+- `*PING` returns `*PONG <uptime_s>`.
+- `*SET:BEEP 500` beeps for about 0.5 s.
+- `*SET:LED 3F` lights LED0-LED5 and enters LED override.
+- `*SET:LED 00` exits LED override.
+- `*SET:MODE NIGHT` shows only HH.MM and keeps heartbeat LED.
+- `*SET:MODE DAY` restores normal display.
+- `*SET:WEA 31 SUN` stores weather and updates weather LEDs.
+- `*NTP SYNC` enables the NTP status LED.
 
-## 编译与烧写建议
+## PC Host
 
-1. 将 `mcu/src/main.c` 复制或加入课程 Keil 工程。
-2. 保留课程给定的 `Inc/`、`Driverlib/` 和启动文件。
-3. 在 `main.c` 中修改：
+Always verify the virtual environment before PC development or running:
 
-```c
-#define STUDENT_ID_LAST8    "12345678"
-#define STUDENT_NAME_PINYIN "ZHANGSAN"
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\pc_host\verify_env.ps1
 ```
 
-4. 用真实驱动替换 `Board_*` 弱定义函数。
-5. 编译生成 `obj/xxx.axf`。
-6. 烧写后检查：
-   - 上电动画完整。
-   - 进入正常时间显示。
-   - 串口助手输入 `*PING` 返回 `*PONG 0`。
-   - 输入 `*GET:TIME` 返回当前时间。
-   - 输入 `*GET:DATE` 返回当前日期。
-   - 输入 `DISP` 可以切换显示模式。
+Run the PC host:
 
-## 下一阶段
+```powershell
+.\pc_host\.venv\Scripts\python.exe .\pc_host\main.py
+```
 
-第二周应继续完成：
+Run protocol smoke tests:
 
-- 完整按键扫描与消抖。
-- 闹钟功能。
-- 编辑状态机。
-- 流水显示与 `FORMAT LEFT/RIGHT`。
-- 完整 `*SET` / `*GET` 协议与容错规则。
-- `*EVT:DISP` / `*EVT:LED` 每秒心跳上报。
+```powershell
+.\pc_host\.venv\Scripts\python.exe .\pc_host\smoke_test.py
+```
+
+Expected smoke test output:
+
+```text
+protocol smoke test OK
+```
+
+## PC Host Features
+
+- Serial scan/connect/disconnect at `115200 8N1`.
+- Background serial receive thread.
+- Digital twin panel:
+  - 8 seven-segment digits with decimal points.
+  - 8 LED indicators.
+  - 8 normal keys plus USER1/USER2.
+- Visual command panel for date, time, alarm, display, format, message, beep, LED, mode, weather, NTP.
+- Event log with TX/RX/EVT/ERR coloring.
+- USER1 event triggers NTP sync.
+- Weather helper uses `wttr.in` and sends `*SET:WEA`.
+- Auto day/night uses `astral` with Shanghai coordinates.
+- Event CSV is written to `pc_host/events.csv`.
+- Chart export creates `pc_host/events_chart.png`.
+- Smoke-test panel sends a protocol regression sequence.
+
+## Evaluation Flow
+
+1. Build and download MCU firmware in Keil.
+2. Open PC host.
+3. Select the board COM port and click `Connect`.
+4. Confirm 1 Hz mirror updates:
+   - Log shows `*EVT:DISP <8chars> <dpHex>`.
+   - Log shows `*EVT:LED <hex2>`.
+   - Digital twin display and LEDs update.
+5. Click virtual keys in the PC host:
+   - Board reacts as if physical keys were pressed.
+   - MCU should not echo `*EVT:KEY` for PC-originated `*SET:KEY`.
+6. Press physical keys on the board:
+   - PC log receives `*EVT:KEY <NAME>`.
+   - Matching virtual key highlights briefly.
+7. Run `Run Smoke Test`:
+   - Expected result is mostly or fully passing.
+   - Board should beep, display switch, LED override, and accept parameterized commands.
+8. Test extensions:
+   - `NTP Sync` sets board time and sends `*NTP SYNC`.
+   - `Fetch Weather` sends weather commands.
+   - `Auto Day/Night` sends `*SET:MODE DAY` or `*SET:MODE NIGHT`.
+   - `Charts` opens an event-count chart after events have been logged.
+
+## Display Ghosting Note
+
+The MCU scan routine now blanks all digit selects before changing segment data and enabling the next digit. If very faint residual glow remains, it is likely hardware persistence/driver leakage; the current code-side mitigation is already the low-risk fix.
