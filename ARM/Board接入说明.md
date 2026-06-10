@@ -125,7 +125,7 @@ AT+STUDENTCODE
 - `*SET FORMAT=LEFT/RIGHT` 切换正常/反向显示。
 - `*SET SPEED=SLOW/FAST` 切换流水速度。
 - `*SET EVT=ON/OFF` 打开或关闭每秒主动上报。第二周调试版默认关闭，避免 SSCOM 刷屏。
-- `*SET BEEP=ON/OFF` 打开或关闭当前蜂鸣占位输出。
+- `*SET BEEP=ON/OFF` 打开或关闭真实蜂鸣器 PWM 输出。
 
 简写也可用：
 
@@ -187,21 +187,30 @@ MSG=HELLO
 - `TM4C_SUBBOARD_0414.pdf`
 - `EK-TM4C1294XL REV D Schematic.pdf`
 - `S800图.JPG`
+- `D:/Download/Beep.c`
 
 结论：
 
 - 蓝板原理图中，蜂鸣器模块丝印/网络为 `BEEP`。
 - `BEEP` 通过 `R70 -> Q9(S8050)` 驱动，输入网络标为 `PWM7`。
-- 蓝板资料同时显示 `PWM0-3` 对应 `PF0-PF3`，`PWM7` 位于 X11 BoosterPack 接口后段。
-- 红板 `EK-TM4C1294XL` 原理图显示 X11 后段映射中，`PA1` 是 UART0 TX / Target TXD；而蓝板原理图中 `PWM7` 所在接口位置疑似落在这一路附近。
+- 课程蜂鸣器例程 `Beep.c` 明确使用 `GPIO_PK5_M0PWM7`，即 `PK5 / PWM0 OUT7`。
+- PWM 初始化使用 `PWM0_BASE`、`PWM_GEN_3`、`PWM_OUT_7`、`PWM_OUT_7_BIT`，周期 `8000`，占空比约 25%。
+- 因此蜂鸣器不需要占用 `PA1/UART0 TX`，不会破坏 SSCOM 使用的 UART0 通信。
 
-因此当前不能直接把 `Board_BuzzerWrite()` 改成 PA1/PWM7 输出，因为这可能会破坏 SSCOM 正在使用的 UART0 TX。当前代码仍保留 `PF0` 作为蜂鸣占位输出，只用于确认闹钟状态和输出节奏。
+当前代码已经按例程接入真实蜂鸣器：
 
-后续解决方式：
+- `S800_GPIO_Init()` 启用 `GPIOK`，并把 `PK5` 配置为 `M0PWM7`。
+- `S800_PWM_Init()` 启用 `PWM0`，配置 `GEN_3 / OUT_7`，默认关闭输出。
+- `Board_BuzzerWrite(true/false)` 通过 `PWMOutputState(PWM0_BASE, PWM_OUT_7_BIT, ...)` 打开/关闭蜂鸣器。
 
-1. 如果确认课程要求蜂鸣器必须使用 `PWM7/PA1`，需要重新设计串口通道，避免 UART0 TX 和蜂鸣器抢同一管脚。
-2. 如果课程另有蜂鸣器例程，请优先按例程使用的管脚改 `Board_BuzzerWrite()`。
-3. 在未确认前，不建议直接改 PA1，否则可能导致串口不能正常发数据。
+重新 Build/Download 后，可在 SSCOM 中直接测试：
+
+```text
+*SET BEEP=ON
+*SET BEEP=OFF
+```
+
+如果 `*SET BEEP=ON` 仍没有声音，优先检查 Keil 工程是否启用了最新 `exp3-1.c`，以及工程里是否正确包含 `driverlib\rvmdk\driverlib.lib`。
  
 
 ## 需要你确认/修改

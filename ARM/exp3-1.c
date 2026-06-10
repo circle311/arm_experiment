@@ -16,6 +16,7 @@
 #include "i2c.h"
 #include "interrupt.h"
 #include "pin_map.h"
+#include "pwm.h"
 #include "sysctl.h"
 #include "systick.h"
 #include "uart.h"
@@ -31,6 +32,7 @@
 #define EDIT_TIMEOUT_MS         5000u
 #define EVENT_INTERVAL_MS       1000u
 #define UART_PROMPT             "> "
+#define BEEP_PERIOD             8000u
 
 #define CLASS_NUMBER            "2445"
 #define STUDENT_CODE            "1910430"
@@ -155,6 +157,7 @@ static void display_text_8(const char *text, uint8_t dp_mask);
 static void S800_GPIO_Init(void);
 static void S800_I2C0_Init(void);
 static void S800_UART_Init(void);
+static void S800_PWM_Init(void);
 static uint8_t I2C0_WriteByte(uint8_t dev_addr, uint8_t reg_addr,
                               uint8_t write_data);
 static uint8_t I2C0_ReadByte(uint8_t dev_addr, uint8_t reg_addr);
@@ -1537,6 +1540,7 @@ static void Board_Init(void)
     S800_GPIO_Init();
     S800_I2C0_Init();
     S800_UART_Init();
+    S800_PWM_Init();
 
     for (i = 0u; i < (uint8_t)KEY_COUNT; ++i) {
         g_key_debounce[i] = KEY_DEBOUNCE_TICKS;
@@ -1628,7 +1632,7 @@ static void Board_UartWriteString(const char *text)
 
 static void Board_BuzzerWrite(bool on)
 {
-    GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_0, on ? GPIO_PIN_0 : 0u);
+    PWMOutputState(PWM0_BASE, PWM_OUT_7_BIT, on);
 }
 
 static void S800_GPIO_Init(void)
@@ -1645,14 +1649,36 @@ static void S800_GPIO_Init(void)
     while (!SysCtlPeripheralReady(SYSCTL_PERIPH_GPION)) {
     }
 
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOK);
+    while (!SysCtlPeripheralReady(SYSCTL_PERIPH_GPIOK)) {
+    }
+
     GPIOPinTypeGPIOOutput(GPIO_PORTF_BASE, GPIO_PIN_0);
     GPIOPinTypeGPIOOutput(GPIO_PORTN_BASE, GPIO_PIN_0 | GPIO_PIN_1);
     GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_0, 0);
     GPIOPinWrite(GPIO_PORTN_BASE, GPIO_PIN_0 | GPIO_PIN_1, 0);
 
+    GPIOPinConfigure(GPIO_PK5_M0PWM7);
+    GPIOPinTypePWM(GPIO_PORTK_BASE, GPIO_PIN_5);
+
     GPIOPinTypeGPIOInput(GPIO_PORTJ_BASE, GPIO_PIN_0 | GPIO_PIN_1);
     GPIOPadConfigSet(GPIO_PORTJ_BASE, GPIO_PIN_0 | GPIO_PIN_1,
                      GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD_WPU);
+}
+
+static void S800_PWM_Init(void)
+{
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_PWM0);
+    while (!SysCtlPeripheralReady(SYSCTL_PERIPH_PWM0)) {
+    }
+
+    PWMClockSet(PWM0_BASE, PWM_SYSCLK_DIV_1);
+    PWMGenConfigure(PWM0_BASE, PWM_GEN_3,
+                    PWM_GEN_MODE_DOWN | PWM_GEN_MODE_NO_SYNC);
+    PWMGenPeriodSet(PWM0_BASE, PWM_GEN_3, BEEP_PERIOD);
+    PWMPulseWidthSet(PWM0_BASE, PWM_OUT_7, BEEP_PERIOD / 4u);
+    PWMOutputState(PWM0_BASE, PWM_OUT_7_BIT, false);
+    PWMGenEnable(PWM0_BASE, PWM_GEN_3);
 }
 
 static void S800_I2C0_Init(void)
